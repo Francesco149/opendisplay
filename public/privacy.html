@@ -82,7 +82,7 @@
   <div class="wrap">
     <p class="eyebrow">Privacy policy</p>
     <h1>No accounts. No analytics. No servers.</h1>
-    <p class="updated">Effective June 11, 2026 · applies to the OpenDisplay Mac and iOS apps and this website</p>
+    <p class="updated">Effective October 17, 2026 · applies to the OpenDisplay Mac, iOS and Android apps and this website</p>
   </div>
 </header>
 
@@ -98,12 +98,12 @@
     </div>
 
     <h2>What OpenDisplay does with your screen</h2>
-    <p>OpenDisplay turns an iPhone or iPad into an extra display for your Mac. To do
+    <p>OpenDisplay turns an iPhone, iPad, Mac or Android device into an extra display for your Mac. To do
     that, the Mac app captures the contents of a virtual display, encodes it as video,
     and sends it over a <strong>single direct connection</strong> to the OpenDisplay
     app on your device:</p>
     <ul>
-      <li><strong>Over USB</strong>, the video travels through your cable via the
+      <li><strong>Over USB</strong> (iPhone and iPad), the video travels through your cable via the
       <code>usbmuxd</code> service built into macOS. It never touches any network.</li>
       <li><strong>Over WiFi</strong>, the video travels across your own local network
       directly between the two devices, discovered via Bonjour.</li>
@@ -146,6 +146,11 @@
       <tr><td>Local Network (Mac and device)</td>
           <td>For WiFi discovery and streaming on your own network. Not needed in
           USB mode.</td></tr>
+      <tr><td>Network access (Android)</td>
+          <td>Android grants these at install, without a prompt: network and WiFi
+          access to advertise the device on your local network and receive the
+          stream, multicast to be discoverable, and a wake lock that keeps WiFi
+          from dozing mid-stream.</td></tr>
     </table>
     <p>Every permission is used solely for the function above, on your own machines.</p>
 
