@@ -172,6 +172,9 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
 .btn.ghost { background: transparent; color: var(--fg); }
 .btn.ghost:hover { background: var(--fg); color: var(--bg); }
 .note { font-size: 0.84rem; color: var(--muted); margin-top: 14px; line-height: 1.5; }
+/* Homebrew one-liner under the Mac download buttons. */
+.note.brew code { font-family: var(--mono); font-size: 0.8rem; color: var(--fg);
+  user-select: all; overflow-wrap: anywhere; }
 .sub { display: block; font-size: 0.84rem; color: var(--muted); margin-top: 12px; }
 .no-break { white-space: nowrap; }
 /* Secondary links under the download buttons share one subtle treatment

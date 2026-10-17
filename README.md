@@ -335,6 +335,15 @@ You need **two apps**: a Mac app (captures and sends) and an iOS app
 (receives and displays). To use a **second Mac** as the display, install
 `OpenDisplay Receiver` on it instead of the iOS app.
 
+### Homebrew (Mac)
+
+```sh
+brew install --cask opendisplay           # the sender
+brew install --cask opendisplay-receiver  # a Mac that should be the display
+```
+
+Both apps keep updating themselves via Sparkle after a Homebrew install.
+
 ### Prebuilt downloads (Mac)
 
 Grab `OpenDisplay.dmg` from the

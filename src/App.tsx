@@ -213,6 +213,9 @@ export default function App() {
                 <a className="btn primary" href="https://github.com/peetzweg/opendisplay/releases/latest/download/OpenDisplay.dmg">
                   Download
                 </a>
+                <p className="note brew">
+                  Or with Homebrew: <code>brew install --cask opendisplay</code>
+                </p>
                 <p className="note">
                   Signed &amp; notarized — opens normally on macOS&nbsp;14+. Prefer to compile it yourself?{" "}
                   <a href="https://github.com/peetzweg/opendisplay#quick-start">Build from source ↗</a>
@@ -255,6 +258,9 @@ export default function App() {
                   Download
                 </a>
                 <div className="receiver-copy">
+                  <p className="note brew">
+                    Or with Homebrew: <code>brew install --cask opendisplay-receiver</code>
+                  </p>
                   <p className="note">
                     Got a spare <em>Mac</em> to use as the display? Install OpenDisplay Receiver on it instead of the iOS app — runs on macOS&nbsp;12+, so older Macs qualify.
                   </p>
