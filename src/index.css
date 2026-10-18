@@ -120,16 +120,18 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
 .download-group-intro { color: var(--muted); font-size: 0.98rem; margin-top: 8px; }
 .download-options { display: grid; gap: 36px; margin-top: 28px; }
 .sender-download { justify-content: center; grid-template-columns: minmax(0, 440px); }
-.receiver-downloads { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }
+.receiver-downloads { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; }
 .download-option { text-align: center; }
 .receiver-visual-placeholder { display: none; }
-@media (min-width: 721px) {
+/* Three receiver cards (iOS, macOS, Android) need more room than two did, so
+   they stack below 900px instead of 720px. */
+@media (min-width: 900px) {
   .receiver-downloads .download-option { display: grid;
     grid-template-rows: 166px auto auto var(--download-control-height) 1fr; align-items: start; }
   .receiver-visual-placeholder { display: block; }
   .receiver-copy, .receiver-downloads .sub { align-self: end; }
 }
-@media (max-width: 720px) {
+@media (max-width: 899px) {
   .receiver-downloads { grid-template-columns: 1fr; gap: 48px; }
 }
 .platform { font-size: clamp(2rem, 4vw, 2.7rem); line-height: 1.1; letter-spacing: -0.02em;
@@ -189,6 +191,12 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
 .app-store-button { display: block; width: 132px; height: var(--download-control-height);
   margin-inline: auto; border-radius: var(--download-control-radius); overflow: hidden; line-height: 0; }
 .app-store-button img { display: block; width: auto; height: 100%; }
+.beta-tag { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line, currentColor);
+  border-radius: 999px; padding: 2px 8px; vertical-align: middle; }
+.beta-steps { text-align: left; color: var(--muted); font-size: 0.86rem;
+  max-width: 34ch; margin: 14px auto 12px; padding-left: 1.3em; }
+.beta-steps li { margin-bottom: 6px; }
 .app-store-qr { height: 166px; }
 .app-store-qr img { display: block; width: 148px; height: 148px; margin-inline: auto; }
 @media (max-width: 680px), (max-height: 500px) and (pointer: coarse) {

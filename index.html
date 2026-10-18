@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OpenDisplay — Turn your spare Apple devices into second monitors for your Mac (free &amp; open source)</title>
-  <meta name="description" content="OpenDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare Apple devices — iPhone and iPad today, Macs on the roadmap — into true extended displays for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account." />
-  <meta name="keywords" content="iPhone second monitor, iPad external display, Sidecar alternative, Duet Display alternative, free second screen Mac, open source, virtual display macOS, USB second display, use iPhone as monitor" />
+  <meta name="description" content="OpenDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare iPhone, iPad, Mac or Android phone or tablet into a true extended display for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account." />
+  <meta name="keywords" content="iPhone second monitor, iPad external display, Sidecar alternative, Duet Display alternative, free second screen Mac, open source, virtual display macOS, USB second display, use iPhone as monitor, Android tablet as Mac monitor, Android second screen for Mac" />
   <link rel="icon" type="image/png" href="./icon-256.png" />
   <link rel="canonical" href="https://opendisplay.app/" />
   <!-- Smart App Banner: offers the iOS receiver to visitors on iPhone/iPad Safari. -->
@@ -35,7 +35,7 @@
     "@type": "SoftwareApplication",
     "name": "OpenDisplay",
     "alternateName": "Open Display",
-    "operatingSystem": "macOS 14+, iPadOS 15+, iOS 15+",
+    "operatingSystem": "macOS 14+, iPadOS 15+, iOS 15+, Android 7.0+ (beta)",
     "applicationCategory": "UtilitiesApplication",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "description": "Free, open-source alternative to Apple Sidecar, Duet Display and Luna Display: use your iPhone or iPad as a true second monitor (extended display, not a mirror) for your Mac over USB or WiFi — Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account.",
@@ -45,6 +45,7 @@
       "Zero-config WiFi discovery via Bonjour",
       "Retina / HiDPI (@2x) display matching the device panel",
       "Touch input: tap to click, drag, two-finger scroll",
+      "Android receiver for phones and tablets, public beta on Google Play for Android 7.0 and later, over WiFi",
       "Portrait or landscape virtual display",
       "Hardware H.264 (VideoToolbox) low-latency pipeline",
       "Self-hosted and private — no servers, accounts or telemetry"
@@ -108,6 +109,14 @@
         "acceptedAnswer": {
           "@type": "Answer",
           "text": "The receiver is a universal iOS app — it runs on iPad today. Run the Mac, an iPhone and an iPad at once for a second and a third screen. iPad-specific features (Apple Pencil, pressure) are on the roadmap."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "How do I get the Android app?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "It's in public beta on Google Play, for Android 7.0 and later. 1. Join the OpenDisplay Google Group (https://groups.google.com/g/opendisplay) with the Google account you use on the phone. 2. Open the tester link (https://play.google.com/apps/testing/com.peetzweg.opendisplay) on the phone or a computer, accept, then install OpenDisplay from Google Play. It connects over WiFi: open the app, and pick the device in the Mac app. A USB cable connection isn't supported yet. Android 5 and 6 support via a direct download is coming."
         }
       },
       {
