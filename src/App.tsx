@@ -276,7 +276,14 @@ export default function App() {
                 </div>
               </div>
               <div className="download-option">
-                <div className="receiver-visual-placeholder" aria-hidden="true" />
+                <div className="app-store-qr">
+                  <img
+                    src="android-beta-qr.svg"
+                    alt="QR code for joining the OpenDisplay Android beta Google Group"
+                    width="148"
+                    height="148"
+                  />
+                </div>
                 <div className="platform">Android <span className="beta-tag">Beta</span></div>
                 <p className="dl-sub">Early access for Android phones and tablets.</p>
                 <a className="btn primary" href={ANDROID_BETA_GROUP_URL}>
