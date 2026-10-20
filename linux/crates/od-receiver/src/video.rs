@@ -163,6 +163,8 @@ pub mod gst_out {
         stall_after: u64,
         /// A failure found outside the bus (a silent decoder), for `poll_error`.
         pending_error: Option<String>,
+        /// When the first IDR of this pipeline went in.
+        first_idr_at: Option<std::time::Instant>,
         generation: u64,
         pushed: u64,
         warned_stall: bool,
@@ -236,6 +238,9 @@ pub mod gst_out {
             if cfg.decoder != "decodebin3" && gst::ElementFactory::find(&cfg.decoder).is_none() {
                 return Err(anyhow!("decoder element `{}` not found", cfg.decoder));
             }
+            if cfg.decoder == "decodebin3" {
+                prefer_software_on_apple_avd();
+            }
             if cfg.decoder == "decodebin3" && !has_h264_decoder() {
                 return Err(anyhow!(
                     "no H.264 decoder element installed; install gst-libav (avdec_h264) or gst-plugin-va (vah264dec)"
@@ -263,6 +268,7 @@ pub mod gst_out {
                 // quarter second at 60 FPS is plenty before giving up on it.
                 stall_after: 15,
                 pending_error: None,
+                first_idr_at: None,
                 generation: 0,
                 pushed: 0,
                 warned_stall: false,
@@ -360,6 +366,8 @@ pub mod gst_out {
             self.appsrc = appsrc;
             self.paintable_sink = paintable_sink;
             self.decoder_name = None;
+            // The next IDR (the caller asks for one) restarts the clock.
+            self.first_idr_at = None;
             self.generation += 1;
             Ok(())
         }
@@ -383,6 +391,50 @@ pub mod gst_out {
                 .set_state(gst::State::Playing)
                 .context("restarting pipeline")?;
             self.decoder_name = None;
+            Ok(())
+        }
+
+        /// A pipeline that accepts frames but never shows one is a negotiation
+        /// problem hiding behind the leaky queue, usually the decoder: a V4L2
+        /// stateless one whose dmabuf the sink cannot take drops every frame
+        /// without an error. After 15 frames, or a second after the first
+        /// IDR, with nothing shown, demote it and rebuild so decodebin3 plugs
+        /// the next; say so once if there is none.
+        fn check_stall(&mut self) -> Result<()> {
+            if self.rendered.load(Ordering::Relaxed) != 0 {
+                return Ok(());
+            }
+            let idr_late = self
+                .first_idr_at
+                .is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+            if self.pushed < self.stall_after && !idr_late {
+                return Ok(());
+            }
+            // A decoder pinned with --decoder is the user's choice: report, do
+            // not replace it.
+            let pinned = self.cfg.decoder != "decodebin3";
+            match self.decoder_factory() {
+                Some(f) if !pinned && f.rank() > gst::Rank::NONE => {
+                    warn!(
+                        "decoder {} showed no frame ({} pushed); falling back to the next one",
+                        f.name(),
+                        self.pushed
+                    );
+                    f.set_rank(gst::Rank::NONE);
+                    self.demoted.push(f.name().to_string());
+                    self.recreate()?;
+                    self.stall_after = self.pushed + 15;
+                    self.pending_error = Some(format!("decoder {} produced no frames", f.name()));
+                }
+                _ if !self.warned_stall => {
+                    self.warned_stall = true;
+                    warn!(
+                        "{} frames pushed, none reached the sink: check caps negotiation (GST_DEBUG=3)",
+                        self.pushed
+                    );
+                }
+                _ => {}
+            }
             Ok(())
         }
 
@@ -418,17 +470,55 @@ pub mod gst_out {
         }
     }
 
+    /// H.264 decoders that work wherever they are installed. V4L2 stateless
+    /// (`v4l2sl*`) ones are left out: they register for any request-API
+    /// device and may show nothing (review T1), so on their own they do not
+    /// make a working receiver; decodebin3 still tries them first.
+    const TRUSTED_H264: &[&str] = &[
+        "avdec_h264",
+        "openh264dec",
+        "vah264dec",
+        "nvh264dec",
+        "v4l2h264dec",
+    ];
+
     fn has_h264_decoder() -> bool {
-        let list = gst::ElementFactory::factories_with_type(
-            gst::ElementFactoryType::DECODER,
-            gst::Rank::MARGINAL,
-        );
-        list.iter().any(|f| {
-            f.static_pad_templates().iter().any(|t| {
-                t.direction() == gst::PadDirection::Sink
-                    && t.caps().iter().any(|s| s.name() == "video/x-h264")
+        TRUSTED_H264
+            .iter()
+            .any(|n| gst::ElementFactory::find(n).is_some_and(|f| f.rank() > gst::Rank::NONE))
+    }
+
+    /// Apple silicon's AVD decoder (Asahi `avd` driver) works through
+    /// v4l2slh264dec but costs ~32 ms per frame against ~2 ms for
+    /// avdec_h264; a receiver wants the latency, so software decode wins
+    /// unless `--decoder` asks for the hardware.
+    fn apple_avd_present() -> bool {
+        std::fs::read_dir("/sys/class/video4linux")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                std::fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.trim() == "avd")
             })
-        })
+    }
+
+    fn prefer_software_on_apple_avd() {
+        if !apple_avd_present() {
+            return;
+        }
+        for f in gst::ElementFactory::factories_with_type(
+            gst::ElementFactoryType::DECODER,
+            gst::Rank::NONE,
+        ) {
+            if f.name().starts_with("v4l2slh264") && f.rank() > gst::Rank::NONE {
+                info!(
+                    "Apple AVD: not using {} (~32 ms per frame); --decoder {} forces it",
+                    f.name(),
+                    f.name()
+                );
+                f.set_rank(gst::Rank::NONE);
+            }
+        }
     }
 
     impl VideoOutput for GstOutput {
@@ -444,38 +534,10 @@ pub mod gst_out {
                 .push_buffer(buffer)
                 .map_err(|e| anyhow!("appsrc push: {e:?}"))?;
             self.pushed += 1;
-            // A pipeline that accepts frames but never shows one is a
-            // negotiation problem hiding behind the leaky queue. Usually the
-            // decoder: a V4L2 stateless one whose dmabuf the sink cannot take
-            // drops every frame without an error. Demote it and rebuild so
-            // decodebin3 plugs the next; say so once if that does not help.
-            if self.pushed >= self.stall_after && self.rendered.load(Ordering::Relaxed) == 0 {
-                let factory = self.decoder_factory();
-                match factory {
-                    Some(f) if f.rank() > gst::Rank::NONE => {
-                        warn!(
-                            "decoder {} showed no frame after {} pushed; falling back to the next one",
-                            f.name(),
-                            self.pushed
-                        );
-                        f.set_rank(gst::Rank::NONE);
-                        self.demoted.push(f.name().to_string());
-                        self.recreate()?;
-                        self.stall_after = self.pushed + 60;
-                        self.pending_error =
-                            Some(format!("decoder {} produced no frames", f.name()));
-                    }
-                    _ if !self.warned_stall => {
-                        self.warned_stall = true;
-                        warn!(
-                            "{} frames pushed, none reached the sink: check caps negotiation (GST_DEBUG=3)",
-                            self.pushed
-                        );
-                    }
-                    _ => {}
-                }
+            if is_idr && self.first_idr_at.is_none() {
+                self.first_idr_at = Some(std::time::Instant::now());
             }
-            Ok(())
+            self.check_stall()
         }
 
         fn reset(&mut self) -> Result<()> {
@@ -487,6 +549,11 @@ pub mod gst_out {
         }
 
         fn poll_error(&mut self) -> Option<String> {
+            // Also on the tick: a static desktop sends few frames, so the
+            // "nothing within a second of the IDR" rule must not wait for one.
+            if let Err(e) = self.check_stall() {
+                warn!("decoder fallback failed: {e:#}");
+            }
             if let Some(e) = self.pending_error.take() {
                 return Some(e);
             }

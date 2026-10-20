@@ -222,6 +222,9 @@ impl Receiver {
                     extra.insert("stalls".into(), sess.counters.dropped_awaiting_idr.into());
                     extra.insert("decoder".into(), self.video.describe().into());
                     if let Some(r) = self.video.rendered() {
+                        // The running total too: decoded-but-never-shown
+                        // shows up as a total stuck at 0.
+                        extra.insert("rendered".into(), r.into());
                         let delta = r - last_rendered;
                         last_rendered = r;
                         extra.insert("renderFps".into(), ((delta as f64 / self.cfg.stats_every.as_secs_f64() * 10.0).round() / 10.0).into());
