@@ -276,22 +276,27 @@ The capture/streaming pipeline itself uses only public APIs.
 
 ## Linux sender (beta)
 
-`od-sender` extends a Linux desktop onto any OpenDisplay receiver (iPhone,
-iPad, Android, or a spare Mac). The beta is tested on **Omarchy / Hyprland
-0.55+** (aarch64 and x86_64); **Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+**
-are experimental.
+The OpenDisplay Linux sender (`od-sender`) extends a Linux desktop onto any
+OpenDisplay receiver (iPhone, iPad, Android, or a spare Mac) by creating a
+virtual display sized for it. The beta is tested on **Omarchy / Hyprland 0.56
+on Apple silicon (Asahi)**; x86_64 is expected to work. **Sway 1.10+, KDE
+Plasma 6.8+ and GNOME 50+** are experimental. Video is CPU-encoded for now
+(VA-API planned), and the stream is not encrypted, so use a network you trust.
 
-An AUR package (`yay -S opendisplay-sender`) and prebuilt x86_64/aarch64
-tarballs are coming with the first `linux-v*` release; until then, build it
-from source ([linux/README.md#from-source](linux/README.md#from-source)) and
-run:
+An AUR package (`yay -S opendisplay-sender`, available once
+`linux-v0.1.0-beta.1` is tagged) and prebuilt x86_64/aarch64 tarballs come
+with the `linux-v*` pre-releases on the
+[releases page](https://github.com/peetzweg/opendisplay/releases); until then,
+build it from source ([linux/README.md#from-source](linux/README.md#from-source)).
+Then, with the OpenDisplay app open on the receiver:
 
 ```sh
-od-sender run
+od-sender doctor              # what it will use on this desktop
+od-sender run --to iPhone     # or just `od-sender run` with one receiver on the network
 ```
 
-Setup, the supported matrix, Hyprland permission rules, known issues and how
-to report a problem are in [linux/README.md](linux/README.md).
+Setup, the supported matrix, desktop notes, troubleshooting and how to report
+a problem are in [linux/README.md](linux/README.md).
 
 ### Linux receiver (preview)
 

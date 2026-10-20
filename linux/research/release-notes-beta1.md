@@ -18,10 +18,11 @@ smoke jobs.
 `od-sender` extends a Linux desktop onto an OpenDisplay receiver: an iPhone,
 iPad, Android device or spare Mac running the OpenDisplay app. It creates a
 virtual display on your compositor sized for the receiver, captures it,
-encodes H.264 and streams it over WiFi; taps and two-finger scrolls on the
+encodes H.264 and streams it over Wi-Fi; taps and two-finger scrolls on the
 receiver come back as pointer input, and rotating the device rebuilds the
-display. Same protocol as the Mac sender, so the existing receivers work
-unchanged. No account, no server, no telemetry.
+virtual display. Same protocol as the Mac sender, so the existing receivers work
+unchanged. No account, no server, no telemetry. The stream is not
+encrypted; use a network you trust.
 
 This is a **beta**: it is tested on one desktop, and the others are marked
 experimental. Reports help a lot (see the end).
@@ -31,7 +32,7 @@ experimental. Reports help a lot (see the end).
 | | |
 |---|---|
 | **Tested** | Omarchy / Hyprland 0.56 on aarch64 (Asahi Linux, M1 Pro), software x264. Receivers: iPhone, Mac receiver app (Intel iMac) |
-| **Expected to work** | Hyprland 0.55+ on any distro with an FFmpeg built with libx264 (otherwise the bundled OpenH264, slower); x86_64; iPad and Android (Google Play beta) as receivers. A first Android session (Pixel 10a, WiFi, 2424x1080) streamed at 53 fps with 33 ms end-to-end median latency (45 ms 95th percentile) |
+| **Expected to work** | Hyprland 0.55+ on any distro with an FFmpeg built with libx264 (otherwise the bundled OpenH264, slower); x86_64; iPad and Android (Google Play beta) as receivers. A first Android session (Pixel 10a, Wi-Fi, 2424x1080) streamed at 53 fps with 33 ms end-to-end median latency (45 ms 95th percentile) |
 | **Experimental** | **Sway 1.10+**, **KDE Plasma 6.8+** (6.7 and older only with the packaged `/usr/bin/od-sender`), **GNOME 50+**. Each passes an automated test on a headless copy of the compositor in CI; none has run on a real desktop session yet |
 | **Your own output** | niri, COSMIC, river, labwc, Wayfire and similar: `od-sender run --output <name>` streams an output you created, if the compositor offers the screen-capture and virtual-pointer protocols (`od-sender doctor` shows them) |
 | **Not supported** | X11 sessions, Hyprland older than 0.55, Flatpak, USB cable, HEVC, Apple Pencil pressure (mapped to a plain pointer), audio, mirroring |
@@ -40,15 +41,15 @@ experimental. Reports help a lot (see the end).
 
 * **Arch Linux / Omarchy:** `yay -S opendisplay-sender`
 * **Other distributions:** the `x86_64` and `aarch64` tarballs below; they
-  need glibc 2.38+ and PipeWire, not FFmpeg. Unpack and put `od-sender` on
-  your `PATH`.
+  need glibc 2.38+ and PipeWire, not FFmpeg. Unpack and run `./install.sh`
+  (into `~/.local/bin`, with the desktop entry and login unit).
 * **From source:** see [linux/README.md](https://github.com/peetzweg/opendisplay/blob/main/linux/README.md#from-source).
 
 Then open the OpenDisplay app on the receiver, on the same network, and run:
 
 ```sh
 od-sender doctor          # what od-sender will use on this desktop
-od-sender run             # first receiver found; or: od-sender run --to iPhone
+od-sender run             # the only receiver found; or: od-sender run --to iPhone
 ```
 
 `systemctl --user enable --now od-sender@iPhone.service` starts it on login.
@@ -64,13 +65,15 @@ od-sender run             # first receiver found; or: od-sender run --to iPhone
   on ProMotion devices).
 * Touch and scroll from the receiver; rotation rebuilds the display after a
   short settle; the receiver locking or quitting is handled.
-* Reconnects after WiFi drops with backoff; recreates the display if it is
+* Reconnects after Wi-Fi drops with backoff; recreates the display if it is
   removed from under it; only one sender per receiver.
 * Stops cleanly on Ctrl+C, `SIGTERM` and `SIGHUP`, removing its display;
   `od-sender clean` removes one left by a crash on Hyprland and Sway (KDE
   Plasma and GNOME clean up by themselves).
 * `~/.config/opendisplay/sender.toml` for defaults and per-receiver
-  overrides; `od-sender list` shows receivers on the network.
+  overrides; `od-sender list` shows receivers on the network. With several
+  receivers and no `--to`, `run` lists them instead of picking one; `--wait`
+  keeps looking (the login unit uses it).
 * On Hyprland before 0.57, screen capture uses wlr-screencopy, which survives
   displays disappearing mid-capture (Hyprland 0.56's other capture path can
   crash there); `--capture` overrides.
@@ -81,7 +84,7 @@ od-sender run             # first receiver found; or: od-sender run --to iPhone
   static screen it can lag until something else changes. The separate
   cursor channel is off on Hyprland (its cursor capture cannot deliver the
   cursor image yet).
-* **Software encoding.** No VA-API yet; x264 on the CPU. A 5K iMac streamed at
+* **CPU encoding for now.** VA-API is planned; today x264 runs on the CPU. A 5K iMac streamed at
   4096x2304 shows about 55-70 ms end to end against ~20 ms for an iPhone.
 * **KDE Plasma:** `--position auto-left` or `auto-up` shift your other screens
   while the display exists (Plasma allows no negative positions); they move
