@@ -9,6 +9,10 @@ const APP_STORE_URL = "https://apps.apple.com/us/app/opendisplay/id6780264891"
 // opens for testers, so the site links the group and the tester opt-in page.
 const ANDROID_BETA_GROUP_URL = "https://groups.google.com/g/opendisplay"
 const ANDROID_BETA_TESTER_URL = "https://play.google.com/apps/testing/com.peetzweg.opendisplay"
+// The Linux sender (od-sender) is a beta for Omarchy / Hyprland, installed
+// from the AUR. Its docs live next to the code in linux/README.md.
+const LINUX_README_URL = "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md"
+const RELEASES_URL = "https://github.com/peetzweg/opendisplay/releases"
 
 const HERO_WORDS = [
   "partner's iPad",
@@ -194,9 +198,9 @@ export default function App() {
             Use your iPhone and iPad as a second — and even a third — screen for your Mac.
             A true extended display, not a mirror: USB or WiFi, Retina-sharp, with touch and
             scroll. No subscription. No dongle. No account. Android phones and tablets are
-            in public beta, over WiFi.
+            in public beta, over WiFi, and so is a sender for Linux desktops on Hyprland.
           </p>
-          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; GPL-3.0</p>
+          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; GPL-3.0</p>
         </div>
       </section>
 
@@ -207,11 +211,11 @@ export default function App() {
       <section className="downloads-sec">
         <div className="wrap">
           <p className="needs-both">
-            OpenDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac and a <strong>Receiver</strong> on the device you want to use as a display. Install both to get going.
+            OpenDisplay is <strong>two apps that work together</strong> — the <strong>Sender</strong> on your Mac (or Linux desktop) and a <strong>Receiver</strong> on the device you want to use as a display. Install both to get going.
           </p>
           <div className="download-group sender-group">
             <h2 className="download-role">Sender</h2>
-            <p className="download-group-intro">Install this on the Mac whose desktop you want to extend or mirror.</p>
+            <p className="download-group-intro">Install this on the computer whose desktop you want to extend.</p>
             <div className="download-options sender-download">
               <div className="download-option">
                 <div className="platform">macOS <span className="ver">{macVer}</span></div>
@@ -229,6 +233,23 @@ export default function App() {
                 <p className="note">
                   Looking for an older version?{" "}
                   <a href="https://github.com/peetzweg/opendisplay/releases">Browse all releases ↗</a>
+                </p>
+              </div>
+              <div className="download-option">
+                <div className="platform">Linux <span className="beta-tag">Beta</span></div>
+                <p className="dl-sub">Extends a Hyprland desktop onto your devices.</p>
+                <a className="btn primary" href={LINUX_README_URL}>
+                  Get started
+                </a>
+                <p className="note brew">
+                  From the AUR: <code>yay -S opendisplay-sender</code>
+                </p>
+                <p className="note">
+                  Omarchy / Hyprland&nbsp;0.55+ · aarch64 and x86_64. GNOME, KDE and Sway are coming.
+                </p>
+                <p className="note">
+                  <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a> ·{" "}
+                  <a href={RELEASES_URL}>Releases ↗</a>
                 </p>
               </div>
             </div>
@@ -567,7 +588,8 @@ export default function App() {
           <p className="eyebrow">Compatible apps</p>
           <h2>Older iPads, Linux, and more Android.</h2>
           <p className="compat-lead">
-            The official apps are a Mac sender and receivers for iPhone, iPad, Mac and Android.
+            The official apps are a Mac sender, a Linux sender in beta, and receivers for iPhone,
+            iPad, Mac and Android.
             Other people have built their own clients that speak the same protocol, so you can also
             use an older iPad as a display, drive one from Linux, or try another Android receiver.
             If your hardware isn't covered yet, start here.

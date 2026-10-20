@@ -119,7 +119,10 @@ h2 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.1; letter-spacing: -0.0
 .download-role { font-size: clamp(2rem, 4vw, 2.7rem); }
 .download-group-intro { color: var(--muted); font-size: 0.98rem; margin-top: 8px; }
 .download-options { display: grid; gap: 36px; margin-top: 28px; }
-.sender-download { justify-content: center; grid-template-columns: minmax(0, 440px); }
+.sender-download { justify-content: center; grid-template-columns: repeat(2, minmax(0, 440px)); }
+@media (max-width: 720px) {
+  .sender-download { grid-template-columns: minmax(0, 440px); gap: 48px; }
+}
 .receiver-downloads { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; }
 .download-option { text-align: center; }
 .receiver-visual-placeholder { display: none; }
