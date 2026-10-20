@@ -54,7 +54,8 @@ jobs:
             pkg-config libwayland-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev \
+            libpipewire-0.3-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -143,4 +144,40 @@ jobs:
         with:
           name: sway-smoke-logs
           path: ${{ runner.temp }}/sway-smoke
+          if-no-files-found: ignore
+
+  # The KDE backend on a headless KWin (SENDER-PLAN §4.3 KWin row):
+  # zkde_screencast virtual outputs, PipeWire frames, fake input, a stream
+  # into od-receiver --sink none. KWin's virtual backend composites with
+  # OpenGL only on a DRM render node; hosted runners have no GPU, so the vgem
+  # module provides one for Mesa's software renderer. Experimental until a
+  # run proves that.
+  kde-smoke:
+    name: kde smoke (x86_64, experimental)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Render node (vgem)
+        run: |
+          sudo modprobe vgem || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vgem
+          }
+          ls -l /dev/dri
+
+      - name: KDE smoke in an Arch container
+        run: |
+          mkdir -p "$RUNNER_TEMP/kde-smoke"
+          docker run --rm --device /dev/dri \
+            -v "$PWD:/src" -v "$RUNNER_TEMP/kde-smoke:/logs" \
+            archlinux:latest bash /src/linux/testbench/kde-ci-container.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kde-smoke-logs
+          path: ${{ runner.temp }}/kde-smoke
           if-no-files-found: ignore
