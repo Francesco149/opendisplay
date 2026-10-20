@@ -91,6 +91,16 @@ fi
   echo
 } > "${prefix}/rustflags"
 
+# Licence texts ride the cache with the libraries; the release tarball's
+# THIRD-PARTY-LICENSES.txt is built from them.
+install -Dm644 "${work}/x264/COPYING" "${prefix}/share/licenses/x264/COPYING"
+install -Dm644 "${work}/ffmpeg/LICENSE.md" "${prefix}/share/licenses/ffmpeg/LICENSE.md"
+for f in COPYING.GPLv2 COPYING.GPLv3 COPYING.LGPLv2.1 COPYING.LGPLv3; do
+  if [ -f "${work}/ffmpeg/${f}" ]; then
+    install -Dm644 "${work}/ffmpeg/${f}" "${prefix}/share/licenses/ffmpeg/${f}"
+  fi
+done
+
 rm -rf "${work}"
 echo "static FFmpeg ${FFMPEG_TAG} + x264 ${X264_COMMIT:0:7} in ${prefix}"
 ls -l "${prefix}/lib"

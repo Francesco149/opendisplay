@@ -62,3 +62,5 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Release tarballs ship this binary as is (makepkg strips the AUR build anyway).
+strip = "symbols"

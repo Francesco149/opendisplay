@@ -11,12 +11,17 @@ on:
       - "linux/**"
       - "PROTOCOL.md"
       - ".github/workflows/linux.yml"
+  # Release tags too: linux-release.yml only unit-tests od-sender, so a
+  # linux-v* tag gets the full suite (clippy, all crates, the smokes) here.
   push:
     branches: [main]
+    tags: ["linux-v*"]
     paths:
       - "linux/**"
       - "PROTOCOL.md"
       - ".github/workflows/linux.yml"
+
+  workflow_dispatch:
 
 concurrency:
   group: linux-${{ github.ref }}
@@ -37,6 +42,7 @@ jobs:
             arch: aarch64
     name: rust (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: linux
@@ -55,7 +61,9 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev \
-            libpipewire-0.3-dev libgtk-4-dev
+            libpipewire-0.3-dev libgtk-4-dev nasm
+      # nasm: OpenH264's x86 assembly, as the AUR package builds it (a
+      # PKGBUILD makedepend on x86_64); without it CI tests the C fallback.
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -68,21 +76,23 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # --locked everywhere: a stale Cargo.lock must fail here, not first in
+      # the AUR build (--frozen) or at tag time.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       # Includes the fake-sender end-to-end run over a real TCP socket against
       # a ReceiverSession null sink: the protocol conformance check.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # Detection and its tests must hold for builds without the optional
       # backends too (the static tarball or a distro may drop them).
       - name: Test od-sender without optional backends
-        run: cargo test -p od-sender --no-default-features
+        run: cargo test --locked -p od-sender --no-default-features
 
       - name: Build release binaries
-        run: cargo build --workspace --release
+        run: cargo build --locked --workspace --release
 
   # The AUR package, built the way an Arch/Omarchy user's AUR helper builds it
   # (SENDER-PLAN §4.3 row 1, step 8), from this checkout instead of the tag.
@@ -92,6 +102,7 @@ jobs:
   arch-package:
     name: arch package (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     container: archlinux:latest
     steps:
       # git before checkout, or actions/checkout falls back to a tarball and
@@ -193,11 +204,16 @@ jobs:
   # zkde_screencast virtual outputs, PipeWire frames, fake input, a stream
   # into od-receiver --sink none. KWin's virtual backend composites with
   # OpenGL only on a DRM render node; hosted runners have no GPU, so the vgem
-  # module provides one for Mesa's software renderer (green since
-  # 2026-10-20; a runner kernel without vgem fails it).
+  # module provides one for Mesa's software renderer. Some runner kernels ship
+  # no vgem: then the smoke is skipped and this job passes WITHOUT coverage;
+  # the step summary says so and `kde coverage` below turns red (it is not
+  # required, so it does not block). SENDER-PLAN §4.3.
   kde-smoke:
     name: kde smoke (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      ran: ${{ steps.dri.outputs.available }}
     steps:
       - uses: actions/checkout@v6
 
@@ -218,6 +234,7 @@ jobs:
           else
             echo "::warning::no render node on $(uname -r) (vgem unavailable); KDE smoke skipped"
             echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "### KDE smoke SKIPPED: no render node on $(uname -r); this run has no KDE coverage" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: KDE smoke in an Arch container
@@ -235,6 +252,25 @@ jobs:
           path: ${{ runner.temp }}/kde-smoke
           if-no-files-found: ignore
 
+  # A separate, non-required check that is red when kde-smoke skipped, so a
+  # green kde-smoke without a run cannot pass for coverage. continue-on-error
+  # keeps the workflow green; the check itself shows the gap.
+  kde-coverage:
+    name: kde coverage
+    needs: kde-smoke
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Did the KDE smoke run?
+        run: |
+          if [ "${{ needs.kde-smoke.outputs.ran }}" != true ]; then
+            echo "::error::KDE smoke did not run (no render node on the runner): no KDE coverage in this run"
+            exit 1
+          fi
+          echo "KDE smoke ran"
+
   # GNOME backend: a headless Mutter with its own session bus, PipeWire and
   # WirePlumber. No GPU or render node needed (Mesa's surfaceless platform;
   # verified with /dev/dri hidden). Virtual monitor
@@ -245,6 +281,7 @@ jobs:
   gnome-smoke:
     name: gnome smoke (x86_64)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 

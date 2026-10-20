@@ -311,9 +311,13 @@ is already the floor when FFmpeg lacks libx264.
 `linux/packaging/ffmpeg/build-static.sh` builds a minimal static FFmpeg
 n9.0.2 (encoders `libx264` + `h264_v4l2m2m` only) and a static x264 r3222;
 `linux-release.yml` links od-sender against it via `FFMPEG_DIR` and fails on
-any NEEDED library beyond glibc/libgcc/libstdc++. On aarch64 the stripped
-binary is 7.3 MB, with encode cost unchanged within noise. The x86_64
-build is still unverified until CI runs. The AUR package (A) still links
+any NEEDED library beyond glibc/libgcc/libstdc++ and libpipewire, and on a
+hard glibc/libstdc++ symbol need above the promised floor
+(`packaging/check-symbol-floor.sh`: glibc 2.38 on x86_64, 2.39 on aarch64,
+GLIBCXX_3.4.32). Stripped (release profile `strip = "symbols"`; measured
+2026-10-20 on CI artifacts, with the KDE and GNOME backends): 10.3 MB on
+aarch64, 12.4 MB on x86_64, encode cost unchanged within noise. Both arches
+build in CI. The AUR package (A) still links
 the system FFmpeg.
 
 ### 3.6 Desktop policy (shared layer, needed at beta)
@@ -429,7 +433,7 @@ uploads both logs. Jobs are gated on `paths` for their backend directory.
 | **Sway, headless** | `archlinux:latest` container on `ubuntu-24.04` (x86_64): `pacman -S sway pixman …`, `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c ci.conf &`, `swaymsg create_output`, `swaymsg output HEADLESS-2 mode --custom 640x480@60Hz`, then `dev smoke --output HEADLESS-2` (Adopt) and, once the backend exists, `--backend wlroots` | **verified** (sway 1.12, aarch64, 2026-10-20) with `linux/testbench/sway-smoke.sh`: `capture-test` + `input-test --output` pass; CI step in `linux.yml` `arch-package` (first run pending) | Ubuntu 24.04's sway 1.9 predates `ext-image-copy-capture` (sway >= 1.10), hence the Arch container, which also matches the AUR target and lets the same job run `makepkg` on the PKGBUILD (exit criterion 4). Exercises `wayland/capture.rs` + `wayland/input.rs` **at beta**, before any Sway backend |
 | **Hyprland, headless** | — | *not feasible* on GPU-less hosted runners (§4.1: allocator needs a DRM fd) | The Hyprland backend's IPC layer gets unit tests against recorded `hyprctl` JSON instead; live coverage is the nested harness here |
 | **Mutter (GNOME), headless** | `archlinux:latest` container: `mutter --headless --wayland --no-x11 --virtual-monitor 1280x800` under its own session bus, PipeWire and `wireplumber --profile policy`, **no system bus** (`DBUS_SYSTEM_BUS_ADDRESS` points nowhere), then `doctor`, `dev smoke --backend gnome` (1170x2532), scale 3→2 with `--position auto-left`, and `kill -9` cleanup; the run is under `strace` and fails on any system-bus connect | **verified locally** (Mutter 51.1, aarch64, `linux/testbench/gnome-smoke.sh`); CI job `gnome-smoke` experimental: first run failed before Mutter (no vgem on the runner kernel), render node now optional | Uses Mutter's private D-Bus APIs, not the portal: no chooser dialog, so it is automatable (`linux/research/gnome-backend.md`) |
-| **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | **verified locally** (KWin 6.8.0 headless on aarch64 with a GPU render node, `linux/testbench/kde-smoke.sh`); CI job `kde-smoke` in `linux.yml` **green** and required since 2026-10-20, with the `vgem` module as render node on GPU-less runners (one runner kernel, 6.17.0-1022-azure, had no vgem: a run landing there fails) | See the KDE findings below |
+| **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | **verified locally** (KWin 6.8.0 headless on aarch64 with a GPU render node, `linux/testbench/kde-smoke.sh`); CI job `kde-smoke` in `linux.yml` **green** and required since 2026-10-20, with the `vgem` module as render node on GPU-less runners (one runner kernel, 6.17.0-1022-azure, had no vgem: a run landing there skips the smoke and the job passes **without coverage**; its step summary says so and the separate, non-required `kde coverage` check turns red) | See the KDE findings below |
 
 **Sway headless findings** (*verified* on sway 1.12 / wlroots 0.20, pixman
 renderer, headless backend, no GPU, isolated `XDG_RUNTIME_DIR`; they feed the
