@@ -1,4 +1,5 @@
 mod backend;
+mod desktop;
 mod dev;
 mod discover;
 mod doctor;
@@ -32,17 +33,17 @@ struct Args {
 
 /// Which compositor backend to use.
 #[derive(ClapArgs, Debug, Clone, Default)]
-struct BackendArgs {
+pub struct BackendArgs {
     /// Force a backend instead of detecting one.
     #[arg(long, value_enum)]
-    backend: Option<BackendId>,
+    pub backend: Option<BackendId>,
     /// Use this existing output instead of creating one (adopt mode).
     #[arg(long, value_name = "NAME")]
-    output: Option<String>,
+    pub output: Option<String>,
 }
 
 impl BackendArgs {
-    fn request(&self) -> Request {
+    pub fn request(&self) -> Request {
         Request {
             backend: self.backend,
             output: self.output.clone(),
@@ -71,6 +72,10 @@ enum Cmd {
         /// (120 on ProMotion), never above it.
         #[arg(long)]
         max_fps: Option<f32>,
+        /// Output scale: `passthrough` (the receiver's own scale), `mac`
+        /// (2 for Retina-class panels, else 1, like the Mac sender) or a number.
+        #[arg(long, default_value = "passthrough")]
+        scale: desktop::ScalePolicy,
         /// H.264 encoder backend (#360).
         #[arg(long, value_enum, default_value_t = encoder::Backend::Auto)]
         encoder: encoder::Backend,
@@ -115,8 +120,6 @@ enum Cmd {
     Dev {
         #[command(subcommand)]
         cmd: dev::Dev,
-        #[command(flatten)]
-        backend: BackendArgs,
     },
 }
 
@@ -179,6 +182,7 @@ fn real_main() -> Result<i32> {
             name,
             bitrate_mbps,
             max_fps,
+            scale,
             threads,
             encoder,
             no_cursor,
@@ -197,7 +201,7 @@ fn real_main() -> Result<i32> {
                     backend.as_mut(),
                     session::RunOptions {
                         bitrate_mbps,
-                        max_fps,
+                        desktop: desktop::DesktopOptions { scale, max_fps },
                         threads: dev::threads_or_all(threads),
                         encoder,
                         cursor_in_video: !no_cursor,
@@ -240,7 +244,7 @@ fn real_main() -> Result<i32> {
                 info!("removed {}", removed.join(", "));
             }
         }
-        Cmd::Dev { cmd, backend } => dev::run(cmd, &backend.request())?,
+        Cmd::Dev { cmd } => dev::run(cmd)?,
     }
     Ok(0)
 }

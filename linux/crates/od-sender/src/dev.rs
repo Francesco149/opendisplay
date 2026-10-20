@@ -80,6 +80,8 @@ pub enum Dev {
         frames: u32,
         #[arg(long, default_value_t = 20.0)]
         timeout: f64,
+        #[command(flatten)]
+        backend: crate::BackendArgs,
     },
 }
 
@@ -93,7 +95,7 @@ pub fn threads_or_all(threads: u16) -> u16 {
     }
 }
 
-pub fn run(cmd: Dev, req: &detect::Request) -> Result<()> {
+pub fn run(cmd: Dev) -> Result<()> {
     match cmd {
         Dev::EncodeBench {
             width,
@@ -159,7 +161,13 @@ pub fn run(cmd: Dev, req: &detect::Request) -> Result<()> {
             size,
             frames,
             timeout,
-        } => smoke(req, &size, frames, Duration::from_secs_f64(timeout)),
+            backend,
+        } => smoke(
+            &backend.request(),
+            &size,
+            frames,
+            Duration::from_secs_f64(timeout),
+        ),
     }
 }
 

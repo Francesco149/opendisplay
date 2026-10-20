@@ -22,13 +22,14 @@ use crate::backend::{
     Backend, CaptureEvent, CaptureOptions, DisplayInfo, DisplaySpec, Frame, FrameSink, InputSink,
     Position, VirtualDisplay,
 };
+use crate::desktop::{self, Debounce, DesktopOptions, DesktopPlan, PlanError, StreamPlan};
 use crate::encoder::{Encoded, Encoder, EncoderSettings};
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
     pub bitrate_mbps: f32,
-    /// `None`: follow the receiver's `displayMaxFrameRate`.
-    pub max_fps: Option<f32>,
+    /// Output scale policy and frame-rate cap for [`desktop::plan`].
+    pub desktop: DesktopOptions,
     pub threads: u16,
     pub encoder: crate::encoder::Backend,
     /// Bake the cursor into the video (receivers without cursor rendering).
@@ -57,47 +58,42 @@ fn short_id(hello: &Hello) -> String {
         .unwrap_or_else(|| "anon".into())
 }
 
-/// The submission-rate ceiling: the receiver's panel rate, lowered by
-/// `--max-fps`. A 120 Hz panel fed 60 fps waits up to a whole extra
-/// interval per frame, which is felt most in pointer motion.
-fn stream_fps(opts: &RunOptions, hello: &Hello) -> u32 {
-    let panel = hello.display_max_frame_rate.unwrap_or(60).clamp(30, 240);
-    opts.max_fps
-        .map_or(panel, |cap| (cap.round().max(1.0) as u32).min(panel))
-}
-
-/// What to build for a `hello`.
+/// What a `hello` asks the backend for: the desktop plan plus where and
+/// under which name the output goes.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DesktopPlan {
-    pub display: DisplaySpec,
-    pub frames_per_second: u32,
+pub struct Target {
+    pub spec: DisplaySpec,
+    pub plan: DesktopPlan,
 }
 
-/// Seam for `desktop::plan(&Hello, &Opts)` (SENDER-PLAN §3.6, being written
-/// separately). Today's behaviour: the output takes `hello`'s pixels and
-/// scale verbatim, at the panel rate.
-pub fn desktop_plan(hello: &Hello, opts: &RunOptions) -> DesktopPlan {
-    DesktopPlan {
-        display: DisplaySpec {
+pub fn target(hello: &Hello, opts: &RunOptions) -> Result<Target, PlanError> {
+    let plan = desktop::plan(hello, &opts.desktop)?;
+    Ok(Target {
+        spec: DisplaySpec {
             name: format!("od-{}", short_id(hello)),
-            width: hello.pixels_wide,
-            height: hello.pixels_high,
-            hz: hello.display_max_frame_rate.unwrap_or(60).clamp(30, 240),
-            scale: if hello.scale >= 1.0 { hello.scale } else { 1.0 },
+            width: plan.output.width,
+            height: plan.output.height,
+            hz: plan.output.hz,
+            scale: plan.output.scale,
             position: opts.position,
         },
-        frames_per_second: stream_fps(opts, hello),
-    }
+        plan,
+    })
 }
 
-/// A repeated `hello` rebuilds the display only when the output would change.
-fn needs_rebuild(current: Option<&DisplaySpec>, next: &DisplaySpec) -> bool {
-    current.is_none_or(|c| {
-        c.name != next.name
-            || c.width != next.width
-            || c.height != next.height
-            || c.scale != next.scale
-    })
+/// The stream to announce for the display as built. A backend that cannot
+/// size its output (adopt) streams the output as it is.
+fn stream_for(info: &DisplayInfo, target: &Target) -> StreamPlan {
+    let s = target.plan.stream;
+    if (info.width, info.height) == (target.spec.width, target.spec.height) {
+        s
+    } else {
+        StreamPlan {
+            width: info.width & !1,
+            height: info.height & !1,
+            ..s
+        }
+    }
 }
 
 /// How often a display that vanished under the session (output removed,
@@ -273,7 +269,7 @@ struct Active {
     input: Option<Box<dyn InputSink>>,
     display: Box<dyn VirtualDisplay>,
     pipe: EncodePipeline,
-    plan: DesktopPlan,
+    target: Target,
 }
 
 impl Active {
@@ -301,35 +297,35 @@ impl Active {
 fn build(
     backend: &mut dyn Backend,
     active: &mut Option<Active>,
-    plan: DesktopPlan,
+    target: Target,
     opts: &RunOptions,
-) -> Result<DisplayInfo> {
+) -> Result<StreamPlan> {
     let mut display = match active.take() {
         Some(Active {
             input,
             mut display,
             pipe,
-            plan: old,
+            target: old,
         }) => {
             drop(input);
             display.stop_capture();
             drop(pipe);
-            if old.display.name == plan.display.name {
-                display.reconfigure(&plan.display)?;
+            if old.spec.name == target.spec.name {
+                display.reconfigure(&target.spec)?;
                 display
             } else {
                 if let Err(e) = display.close(opts.keep_output) {
-                    warn!("closing {}: {e:#}", old.display.name);
+                    warn!("closing {}: {e:#}", old.spec.name);
                 }
-                backend.open(&plan.display)?
+                backend.open(&target.spec)?
             }
         }
-        None => backend.open(&plan.display)?,
+        None => backend.open(&target.spec)?,
     };
     let mut pipe = EncodePipeline::start(EncoderSettings {
         backend: opts.encoder,
         bitrate_bps: (opts.bitrate_mbps * 1e6) as u32,
-        max_fps: plan.frames_per_second as f32,
+        max_fps: target.plan.stream.fps as f32,
         threads: opts.threads,
     })?;
     display.start_capture(
@@ -345,14 +341,14 @@ fn build(
             None
         }
     };
-    let info = display.info().clone();
+    let stream = stream_for(display.info(), &target);
     *active = Some(Active {
         input,
         display,
         pipe,
-        plan,
+        target,
     });
-    Ok(info)
+    Ok(stream)
 }
 
 /// Resolves to `true` on SIGINT or SIGTERM. Handled explicitly so the output
@@ -383,6 +379,8 @@ pub enum SessionEnd {
     ReceiverClosed,
     /// The display kept vanishing or could not be recreated: stop.
     DisplayLost,
+    /// No stream this sender can produce suits the receiver: stop.
+    Incompatible,
 }
 
 pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) -> Result<()> {
@@ -410,6 +408,10 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
                 match session(stream, backend, &opts, start, shutdown.clone(), &mut losses).await {
                     Ok(SessionEnd::ReceiverClosed) => {
                         info!("receiver closed the session for good");
+                        break;
+                    }
+                    Ok(SessionEnd::Incompatible) => {
+                        warn!("giving up: the receiver accepts no stream this sender can produce");
                         break;
                     }
                     Ok(SessionEnd::DisplayLost) => {
@@ -453,19 +455,39 @@ async fn next_display_event(active: &mut Option<Active>) -> DisplayEvent {
 async fn send_stream_config<S: AsyncWrite + Unpin>(
     stream: &mut S,
     sess: &SenderSession,
-    info: &DisplayInfo,
-    fps: u32,
+    plan: &StreamPlan,
 ) -> Result<()> {
     let cfg = sess.stream_config(StreamConfig {
-        codec: "h264".into(),
-        width: info.width & !1,
-        height: info.height & !1,
-        frames_per_second: fps,
+        codec: plan.codec.into(),
+        width: plan.width,
+        height: plan.height,
+        frames_per_second: plan.fps,
     });
     if let SenderAction::Send(b) = cfg {
         stream.write_all(&b).await.context("write")?;
     }
     Ok(())
+}
+
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Build the display for `target` and announce its stream.
+async fn apply<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    sess: &SenderSession,
+    backend: &mut dyn Backend,
+    active: &mut Option<Active>,
+    target: Target,
+    opts: &RunOptions,
+) -> Result<()> {
+    info!("plan: {}", target.plan);
+    let plan = build(backend, active, target, opts)?;
+    send_stream_config(stream, sess, &plan).await
 }
 
 async fn session<S: AsyncRead + AsyncWrite + Unpin>(
@@ -479,6 +501,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     let mut sess = SenderSession::new(SenderConfig::default());
     sess.handle(now(start), SenderEvent::Connected);
     let mut active: Option<Active> = None;
+    let mut debounce: Debounce<Target> = Debounce::new(desktop::HELLO_DEBOUNCE);
     let mut buf = vec![0u8; 64 * 1024];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut stats_tick = tokio::time::interval(Duration::from_secs(5));
@@ -509,17 +532,17 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         a
                     }
                     DisplayEvent::Lost(why) => {
-                        let plan = active.as_ref().map(|a| a.plan.clone()).expect("lost implies active");
-                        warn!("virtual display {} lost: {why}", plan.display.name);
+                        let target = active.as_ref().map(|a| a.target.clone()).expect("lost implies active");
+                        let name = target.spec.name.clone();
+                        warn!("virtual display {name} lost: {why}");
                         if !losses.allow(Instant::now()) {
-                            warn!("{} lost too often; closing the connection", plan.display.name);
+                            warn!("{name} lost too often; closing the connection");
                             return Ok(SessionEnd::DisplayLost);
                         }
-                        let fps = plan.frames_per_second;
-                        match build(backend, &mut active, plan, opts) {
-                            Ok(info) => {
-                                info!("recreated virtual display {}", info.name);
-                                send_stream_config(&mut stream, &sess, &info, fps).await?;
+                        match build(backend, &mut active, target, opts) {
+                            Ok(plan) => {
+                                info!("recreated virtual display {name}");
+                                send_stream_config(&mut stream, &sess, &plan).await?;
                             }
                             Err(e) => {
                                 warn!("cannot recreate the virtual display: {e:#}; closing the connection");
@@ -529,6 +552,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         vec![]
                     }
                 },
+                _ = sleep_until_opt(debounce.deadline()) => {
+                    if let Some(t) = debounce.poll(Instant::now()) {
+                        apply(&mut stream, &sess, backend, &mut active, t, opts).await?;
+                    }
+                    vec![]
+                }
                 _ = tick.tick() => {
                     if opts.duration.is_some_and(|d| start.elapsed() >= d) { return Ok(SessionEnd::Ended); }
                     sess.handle(now(start), SenderEvent::Tick)
@@ -555,11 +584,16 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             "hello: {}x{} @{} scale {} device {:?} id {:?} pv {}",
                             h.pixels_wide, h.pixels_high, h.display_max_frame_rate.unwrap_or(60), h.scale, h.device, h.id, sess.receiver_pv()
                         );
-                        let plan = desktop_plan(&h, opts);
-                        if needs_rebuild(active.as_ref().map(|a| &a.plan.display), &plan.display) {
-                            let fps = plan.frames_per_second;
-                            let info = build(backend, &mut active, plan, opts)?;
-                            send_stream_config(&mut stream, &sess, &info, fps).await?;
+                        let t = match target(&h, opts) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!("cannot plan a desktop for this receiver: {e}; closing the connection");
+                                return Ok(SessionEnd::Incompatible);
+                            }
+                        };
+                        // The first plan applies at once; re-sent hellos settle first (§6.1).
+                        if let Some(t) = debounce.on_hello(t, Instant::now()) {
+                            apply(&mut stream, &sess, backend, &mut active, t, opts).await?;
                         }
                     }
                     SenderAction::RequestKeyframe => {
@@ -622,7 +656,7 @@ mod tests {
     fn opts() -> RunOptions {
         RunOptions {
             bitrate_mbps: 20.0,
-            max_fps: None,
+            desktop: DesktopOptions::default(),
             threads: 1,
             encoder: crate::encoder::Backend::Auto,
             cursor_in_video: true,
@@ -646,44 +680,32 @@ mod tests {
     }
 
     #[test]
-    fn plan_keeps_todays_behaviour() {
-        let p = desktop_plan(&hello(), &opts());
-        assert_eq!(p.display.name, "od-3f9a1c");
-        assert_eq!((p.display.width, p.display.height), (2532, 1170));
-        assert_eq!((p.display.hz, p.display.scale), (120, 3.0));
-        assert_eq!(p.frames_per_second, 120);
-        let capped = desktop_plan(
-            &hello(),
-            &RunOptions {
-                max_fps: Some(30.0),
-                ..opts()
-            },
+    fn target_names_the_output_after_the_receiver() {
+        let t = target(&hello(), &opts()).unwrap();
+        assert_eq!(t.spec.name, "od-3f9a1c");
+        assert_eq!(
+            (t.spec.width, t.spec.height, t.spec.hz),
+            (t.plan.output.width, t.plan.output.height, t.plan.output.hz)
         );
-        assert_eq!(capped.frames_per_second, 30);
-        let anon = desktop_plan(
+        let anon = target(
             &Hello {
                 id: None,
-                scale: 0.0,
-                display_max_frame_rate: None,
                 ..hello()
             },
             &opts(),
-        );
-        assert_eq!(anon.display.name, "od-anon");
-        assert_eq!((anon.display.hz, anon.display.scale), (60, 1.0));
+        )
+        .unwrap();
+        assert_eq!(anon.spec.name, "od-anon");
     }
 
     #[test]
-    fn rebuild_only_when_the_output_changes() {
-        let a = desktop_plan(&hello(), &opts()).display;
-        assert!(needs_rebuild(None, &a));
-        assert!(!needs_rebuild(Some(&a), &a.clone()));
-        let rotated = DisplaySpec {
-            width: a.height,
-            height: a.width,
-            ..a.clone()
-        };
-        assert!(needs_rebuild(Some(&a), &rotated));
+    fn adopted_outputs_stream_at_their_own_size() {
+        let t = target(&hello(), &opts()).unwrap();
+        let mut info = info_of(&t.spec);
+        assert_eq!(stream_for(&info, &t), t.plan.stream);
+        (info.width, info.height) = (1921, 1080);
+        let s = stream_for(&info, &t);
+        assert_eq!((s.width, s.height, s.fps), (1920, 1080, t.plan.stream.fps));
     }
 
     #[test]
