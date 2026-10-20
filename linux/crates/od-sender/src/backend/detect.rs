@@ -50,10 +50,19 @@ pub struct Request {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-    Hyprland { socket: PathBuf },
-    Wlroots { swaysock: PathBuf },
+    Hyprland {
+        socket: PathBuf,
+    },
+    Wlroots {
+        swaysock: PathBuf,
+    },
     Kde,
-    Adopt { output: String },
+    /// GNOME: Mutter's ScreenCast/RemoteDesktop D-Bus APIs (probed when the
+    /// backend starts, so `decide` stays free of D-Bus).
+    Gnome,
+    Adopt {
+        output: String,
+    },
     Unsupported(String),
 }
 
@@ -235,6 +244,7 @@ pub fn decide(
             };
             return done(steps, d);
         }
+        (Some(BackendId::Gnome), _) => return done(steps, gnome_decision()),
         (Some(b @ BackendId::Portal), _) => {
             return done(
                 steps,
@@ -280,7 +290,7 @@ pub fn decide(
                     )),
                 );
             }
-            // 5. KDE.
+            // 5. KDE, GNOME.
             let kde = env.kde_full_session
                 || env
                     .current_desktop
@@ -299,10 +309,15 @@ pub fn decide(
         steps.push("WAYLAND_DISPLAY not set".into());
     }
 
-    // 6. Portal (GNOME and others): the D-Bus probe lands with the portal backend.
     if let Some(d) = &env.current_desktop {
         steps.push(format!("XDG_CURRENT_DESKTOP={d}"));
+        // `ubuntu:GNOME`, `GNOME-Classic:GNOME`, `GNOME`.
+        if d.split(':').any(|p| p == "GNOME" || p == "GNOME-Classic") {
+            return done(steps, gnome_decision());
+        }
     }
+
+    // 6. Portal (sandboxed and other desktops): lands with the portal backend.
 
     // 7. Nothing.
     if env.session_type.as_deref() == Some("x11") {
@@ -320,6 +335,16 @@ pub fn decide(
             "no supported compositor found ({desktop}); od-sender supports Hyprland >= 0.55 for now ({ISSUE})"
         ))),
     )
+}
+
+fn gnome_decision() -> Decision {
+    if cfg!(feature = "gnome") {
+        Decision::Gnome
+    } else {
+        Decision::Unsupported(
+            "this od-sender was built without GNOME support (cargo feature `gnome`)".into(),
+        )
+    }
 }
 
 /// Sway: its IPC socket must exist and the compositor must offer what the
@@ -380,6 +405,15 @@ pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
         Decision::Kde => Ok(Box::new(super::kde::KdeBackend)),
         #[cfg(not(feature = "kde"))]
         Decision::Kde => Err(anyhow!(Unsupported("built without KDE support".into()))),
+        #[cfg(feature = "gnome")]
+        Decision::Gnome => match super::gnome::GnomeBackend::connect() {
+            Ok(b) => Ok(Box::new(b)),
+            Err(e) => Err(anyhow!(Unsupported(format!(
+                "GNOME: Mutter's ScreenCast/RemoteDesktop D-Bus APIs are not reachable ({e:#}); od-sender needs an unsandboxed GNOME Wayland session"
+            )))),
+        },
+        #[cfg(not(feature = "gnome"))]
+        Decision::Gnome => Err(anyhow!(Unsupported("built without GNOME support".into()))),
         Decision::Adopt { output } => Ok(Box::new(AdoptBackend::new(output))),
         Decision::Unsupported(msg) => Err(anyhow!(Unsupported(msg))),
     }
@@ -634,10 +668,26 @@ mod tests {
         assert!(unsupported(&w).contains("needs --output"));
         let (w, _) = run(&env, &force(BackendId::Wlroots), None);
         assert!(unsupported(&w).contains("SWAYSOCK is not set"));
+        let (w, _) = run(&env, &force(BackendId::Gnome), None);
+        assert_eq!(w.decision, Decision::Gnome);
         let (w, _) = run(&env, &force(BackendId::Kde), None);
         assert!(unsupported(&w).contains("--backend kde"));
         let (w, _) = run(&env, &force(BackendId::Portal), None);
         assert!(unsupported(&w).contains("not implemented yet"));
+    }
+
+    #[test]
+    fn gnome_sessions_pick_the_gnome_backend() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "GNOME-Classic:GNOME"] {
+            let env = Environment {
+                wayland_display: Some("wayland-0".into()),
+                current_desktop: Some(desktop.into()),
+                ..Default::default()
+            };
+            // Mutter offers neither wlr virtual pointer nor KDE protocols.
+            let (w, _) = run(&env, &Request::default(), Some(Snapshot::default()));
+            assert_eq!(w.decision, Decision::Gnome, "{desktop}");
+        }
     }
 
     #[test]

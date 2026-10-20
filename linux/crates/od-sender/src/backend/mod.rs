@@ -4,6 +4,8 @@
 
 pub mod adopt;
 pub mod detect;
+#[cfg(feature = "gnome")]
+pub mod gnome;
 pub mod hyprland;
 #[cfg(feature = "kde")]
 pub mod kde;
@@ -32,6 +34,8 @@ pub enum BackendId {
     /// fake-input pointer.
     Kde,
     /// xdg-desktop-portal ScreenCast/RemoteDesktop, e.g. GNOME (not implemented yet).
+    /// GNOME: virtual monitor and input over Mutter's D-Bus APIs.
+    Gnome,
     Portal,
 }
 
@@ -42,6 +46,7 @@ impl fmt::Display for BackendId {
             BackendId::Adopt => "adopt",
             BackendId::Wlroots => "wlroots",
             BackendId::Kde => "kde",
+            BackendId::Gnome => "gnome",
             BackendId::Portal => "portal",
         })
     }

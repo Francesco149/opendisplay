@@ -55,6 +55,11 @@ pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
             println!("  => kde");
             true
         }
+        Decision::Gnome => {
+            // `instantiate` below probes Mutter's D-Bus APIs and prints their versions.
+            println!("  => gnome (Mutter ScreenCast/RemoteDesktop over D-Bus)");
+            true
+        }
         Decision::Adopt { output } => {
             println!("  => adopt output {output}");
             true

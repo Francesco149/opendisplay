@@ -4,7 +4,7 @@
 //! the dmabuf path comes with hardware encode.
 
 // Built for a backend; with the feature alone nothing calls it yet.
-#![cfg_attr(not(feature = "kde"), allow(dead_code))]
+#![cfg_attr(not(any(feature = "kde", feature = "gnome")), allow(dead_code))]
 
 use std::os::fd::OwnedFd;
 use std::sync::mpsc;
