@@ -20,6 +20,7 @@ on:
   pull_request:
     paths:
       - "linux/packaging/ffmpeg/**"
+      - "linux/packaging/flatpak/**"
       - ".github/workflows/linux-release.yml"
   workflow_dispatch:
 
@@ -146,8 +147,33 @@ jobs:
           path: ${{ runner.temp }}/dist/*
           if-no-files-found: error
 
+  # The receiver as a Flatpak bundle: the install path for read-only systems
+  # (SteamOS, the Steam Frame) and anything without GTK 4 / GStreamer.
+  flatpak:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    name: od-receiver flatpak (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v6
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: od-receiver-${{ matrix.arch }}.flatpak
+          manifest-path: linux/packaging/flatpak/app.opendisplay.Receiver.yml
+          arch: ${{ matrix.arch }}
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('linux/Cargo.lock') }}
+
   release:
-    needs: build
+    needs: [build, flatpak]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -187,6 +213,8 @@ jobs:
 
           **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed; PipeWire (\`libpipewire-0.3\`, present on any current desktop) must be installed. Unpack and run \`./install.sh\` (into \`~/.local\`; \`sudo ./install.sh --system\` for \`/usr/local\`): it installs \`od-sender\`, a desktop entry and a \`systemd --user\` template unit pointing at it. Then run \`od-sender run\`. Each tarball also has the license (GPL-3.0; this build includes GPL x264) and \`PROTOCOL.md\`.
 
+          **Receiver (\`od-receiver\`), any distribution incl. SteamOS:** \`flatpak install --user od-receiver-<arch>.flatpak\`, then start "OpenDisplay Receiver". It fills the screen when a sender connects.
+
           Linked-in sources: FFmpeg [${ffmpeg_tag}](https://github.com/FFmpeg/FFmpeg/tree/${ffmpeg_tag}) and x264 [${x264_commit:0:7}](https://code.videolan.org/videolan/x264/-/tree/${x264_commit}), configured by [\`build-static.sh\`](https://github.com/${GH_REPO}/blob/${TAG}/${script}).
 
           Source tarball sha256 (AUR): \`${src_sha}\`
@@ -196,7 +224,7 @@ jobs:
       # Always a pre-release while the sender is in beta; never "Latest".
       - name: Create pre-release
         run: |
-          gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+          gh release create "$TAG" dist/*.tar.gz dist/*.sha256 dist/*.flatpak \
             --verify-tag \
             --prerelease \
             --latest=false \
