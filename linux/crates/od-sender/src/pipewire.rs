@@ -276,7 +276,7 @@ fn run(
                 captured_at: Instant::now(),
                 presentation_ns: None,
                 buf: FrameBuf::Cpu {
-                    pixels: bytes[offset..offset + need].to_vec(),
+                    pixels: bytes[offset..offset + need].to_vec().into(),
                     width: size.width,
                     height: size.height,
                     stride,
