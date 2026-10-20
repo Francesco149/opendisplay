@@ -1,18 +1,20 @@
 //! H.264 through the system FFmpeg: libx264 in software, or a V4L2 mem2mem
 //! hardware encoder. Capture hands us BGRA; swscale converts it to the
 //! encoder's 4:2:0 format with BT.709 limited-range coefficients, which the
-//! stream's VUI announces so the receiver converts back the same way.
+//! stream's VUI announces so the receiver converts back the same way
+//! ([`Converter`], in parallel bands).
 
 use std::collections::VecDeque;
 use std::sync::Once;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use ff::format::Pixel;
 use ff::util::color;
 use ffmpeg_next as ff;
 use opendisplay_proto::video::{AccessUnit, NalType, access_units, nal_units};
 
+use super::convert::{Converter, band_count};
 use super::{Encoded, EncoderSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +25,8 @@ pub enum Kind {
 
 pub struct FfmpegEncoder {
     enc: ff::encoder::Video,
-    sws: ff::software::scaling::Context,
+    convert: Converter,
     yuv: ff::frame::Video,
-    width: u32,
-    height: u32,
     pts: i64,
     /// Capture instants of frames handed to the encoder, by pts. A hardware
     /// encoder may return a packet one call late.
@@ -112,30 +112,7 @@ impl FfmpegEncoder {
             .open_with(opts)
             .with_context(|| format!("opening {name} at {width}x{height}"))?;
 
-        let sws = ff::software::scaling::Context::get(
-            Pixel::BGRA,
-            width,
-            height,
-            format,
-            width,
-            height,
-            ff::software::scaling::Flags::BILINEAR,
-        )?;
-        // SAFETY: coefficient tables are static; the context is valid.
-        unsafe {
-            let coeffs = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
-            // Source full range (desktop RGB), destination limited (video).
-            ff::ffi::sws_setColorspaceDetails(
-                sws.as_ptr() as *mut _,
-                coeffs,
-                1,
-                coeffs,
-                0,
-                0,
-                1 << 16,
-                1 << 16,
-            );
-        }
+        let convert = Converter::new(width, height, format, band_count(height, s.threads))?;
 
         let mut yuv = ff::frame::Video::new(format, width, height);
         yuv.set_color_space(color::Space::BT709);
@@ -145,10 +122,8 @@ impl FfmpegEncoder {
 
         Ok(Self {
             enc,
-            sws,
+            convert,
             yuv,
-            width,
-            height,
             pts: 0,
             in_flight: VecDeque::new(),
             param_sets: Vec::new(),
@@ -163,38 +138,7 @@ impl FfmpegEncoder {
         captured_at: Instant,
     ) -> Result<Vec<Encoded>> {
         let t0 = Instant::now();
-        if bgra.len() < stride as usize * (self.height as usize - 1) + self.width as usize * 4 {
-            bail!(
-                "frame buffer smaller than {}x{} at stride {stride}",
-                self.width,
-                self.height
-            );
-        }
-        // SAFETY: the source pointer/stride describe `height` rows inside
-        // `bgra` (checked above); the destination is our own frame, made
-        // writable first because the encoder may still reference its buffers.
-        unsafe {
-            let dst = self.yuv.as_mut_ptr();
-            if ff::ffi::av_frame_make_writable(dst) < 0 {
-                bail!("av_frame_make_writable failed");
-            }
-            let src = [
-                bgra.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            ];
-            let src_stride = [stride as i32, 0, 0, 0];
-            ff::ffi::sws_scale(
-                self.sws.as_mut_ptr(),
-                src.as_ptr(),
-                src_stride.as_ptr(),
-                0,
-                self.height as i32,
-                (*dst).data.as_ptr(),
-                (*dst).linesize.as_ptr(),
-            );
-        }
+        self.convert.convert(bgra, stride, &mut self.yuv)?;
         self.yuv.set_pts(Some(self.pts));
         self.yuv.set_kind(if force_idr {
             ff::picture::Type::I

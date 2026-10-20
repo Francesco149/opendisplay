@@ -10,6 +10,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use opendisplay_proto::control::{Scroll, Touch, TouchPhase};
 use tracing::{debug, warn};
+
+use crate::backend::InputSink;
 use wayland_client::protocol::{wl_output, wl_pointer, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
@@ -19,7 +21,7 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 const BTN_LEFT: u32 = 0x110;
 
 #[derive(Debug)]
-pub enum InputCmd {
+enum InputCmd {
     Touch(Touch),
     Scroll(Scroll),
     /// Move without pressing (used by the self-test).
@@ -120,7 +122,7 @@ pub struct InputInjector {
 
 impl InputInjector {
     /// Start the injector thread for the output named `output_name`;
-    /// `scale` is `hello.scale`, used to turn video pixels into logical pixels
+    /// `scale` is the output scale, used to turn video pixels into logical pixels
     /// for scroll deltas.
     pub fn start(output_name: &str, scale: f64) -> Result<InputInjector> {
         let (tx, rx) = mpsc::channel::<InputCmd>();
@@ -138,8 +140,23 @@ impl InputInjector {
         Ok(InputInjector { tx })
     }
 
-    pub fn send(&self, cmd: InputCmd) {
+    fn send(&self, cmd: InputCmd) {
         let _ = self.tx.send(cmd);
+    }
+
+    /// Move the pointer without pressing; `x`/`y` normalised to the output.
+    pub fn move_to(&self, x: f64, y: f64) {
+        self.send(InputCmd::Move { x, y });
+    }
+}
+
+impl InputSink for InputInjector {
+    fn touch(&mut self, t: &Touch) {
+        self.send(InputCmd::Touch(t.clone()));
+    }
+
+    fn scroll(&mut self, s: &Scroll) {
+        self.send(InputCmd::Scroll(s.clone()));
     }
 }
 

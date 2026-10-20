@@ -16,17 +16,29 @@ pub struct Found {
     pub pv: u32,
 }
 
-/// Browse until a receiver (optionally one whose instance name contains
-/// `name`) resolves, or `timeout` passes.
-pub fn find(name: Option<&str>, timeout: Duration) -> Result<Found> {
+impl Found {
+    /// `--to` matching: the instance name contains `to`, or the receiver
+    /// `id` equals it (case-insensitive).
+    pub fn matches(&self, to: &str) -> bool {
+        self.instance.contains(to)
+            || self
+                .id
+                .as_deref()
+                .is_some_and(|id| id.eq_ignore_ascii_case(to))
+    }
+}
+
+/// Browse for `timeout`, calling `on_found` for each resolved receiver
+/// until it returns `true`.
+fn browse(timeout: Duration, mut on_found: impl FnMut(Found) -> bool) -> Result<()> {
     let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
     let ty = format!("{SERVICE_TYPE}.local.");
     let rx = daemon.browse(&ty).context("browsing")?;
     let deadline = Instant::now() + timeout;
-    let result = loop {
+    loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            break Err(anyhow::anyhow!("no receiver found within {timeout:?}"));
+            break;
         }
         match rx.recv_timeout(left) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
@@ -34,10 +46,6 @@ pub fn find(name: Option<&str>, timeout: Duration) -> Result<Found> {
                     .get_fullname()
                     .trim_end_matches(&format!(".{ty}"))
                     .to_string();
-                if name.is_some_and(|n| !instance.contains(n)) {
-                    info!("skipping {instance}");
-                    continue;
-                }
                 // Prefer IPv4: link-local IPv6 needs a scope id we do not have (§6.1 addrs note).
                 let ip = info
                     .get_addresses()
@@ -50,22 +58,52 @@ pub fn find(name: Option<&str>, timeout: Duration) -> Result<Found> {
                     .get_property_val_str("pv")
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(1);
-                break Ok(Found {
+                let found = Found {
                     instance,
                     addr: SocketAddr::new(ip, info.get_port()),
                     id,
                     pv,
-                });
+                };
+                if found.pv >= 1 && on_found(found) {
+                    break;
+                }
             }
             Ok(_) => continue,
-            Err(_) => break Err(anyhow::anyhow!("no receiver found within {timeout:?}")),
+            Err(_) => break,
         }
-    };
+    }
     let _ = daemon.stop_browse(&ty);
     let _ = daemon.shutdown();
-    let found = result?;
-    if found.pv < 1 {
-        bail!("nonsense pv");
+    Ok(())
+}
+
+/// Browse until a receiver (optionally one matching `to`, see
+/// [`Found::matches`]) resolves, or `timeout` passes.
+pub fn find(to: Option<&str>, timeout: Duration) -> Result<Found> {
+    let mut hit = None;
+    browse(timeout, |f| {
+        if to.is_some_and(|t| !f.matches(t)) {
+            info!("skipping {}", f.instance);
+            return false;
+        }
+        hit = Some(f);
+        true
+    })?;
+    match hit {
+        Some(f) => Ok(f),
+        None => bail!("no receiver found within {timeout:?}"),
     }
-    Ok(found)
+}
+
+/// Every receiver that resolves within `timeout`, one entry per instance.
+pub fn list(timeout: Duration) -> Result<Vec<Found>> {
+    let mut all: Vec<Found> = Vec::new();
+    browse(timeout, |f| {
+        if !all.iter().any(|a| a.instance == f.instance) {
+            all.push(f);
+        }
+        false
+    })?;
+    all.sort_by(|a, b| a.instance.cmp(&b.instance));
+    Ok(all)
 }

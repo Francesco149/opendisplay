@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
+
+use crate::backend::{CaptureEvent, CaptureOptions, Frame, FrameBuf, FrameSink, PixelFormat};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::ext::image_capture_source::v1::client::{
@@ -30,6 +32,8 @@ pub struct FrameInfo {
     pub format: wl_shm::Format,
     /// Compositor presentation time of this frame, if reported.
     pub presentation_ns: Option<u128>,
+    /// When the compositor said the frame was ready, before we copy it out.
+    pub ready_at: Instant,
 }
 
 struct ShmBuffer {
@@ -231,15 +235,97 @@ noop_dispatch!(
     ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1
 );
 
+/// A capture of one output on its own thread. [`stop`](Self::stop) (or drop)
+/// joins the thread, so once it returns no frame is in flight.
+pub struct CaptureThread {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CaptureThread {
+    pub fn spawn(output: &str, opts: CaptureOptions, mut sink: FrameSink) -> Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let output = output.to_string();
+        let handle = std::thread::Builder::new()
+            .name("capture".into())
+            .spawn(move || {
+                // A panic in here (or in the sink) must still tell the session
+                // that capture is gone, so it rebuilds instead of idling.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    capture_shm(
+                        Some(&output),
+                        opts.cursor,
+                        Duration::from_secs(u64::MAX / 4),
+                        thread_stop.clone(),
+                        |info, pixels| {
+                            sink(CaptureEvent::Frame(Frame {
+                                captured_at: info.ready_at,
+                                presentation_ns: info.presentation_ns,
+                                buf: FrameBuf::Cpu {
+                                    pixels,
+                                    width: info.width,
+                                    height: info.height,
+                                    stride: info.stride,
+                                    format: pixel_format(info.format),
+                                },
+                            }));
+                        },
+                    )
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("capture thread panicked")));
+                if thread_stop.load(Ordering::Relaxed) {
+                    if let Err(e) = r {
+                        debug!("capture ended after stop: {e:#}");
+                    }
+                    return;
+                }
+                let why = match r {
+                    Ok(_) => format!("capture of {output} stopped by the compositor"),
+                    Err(e) => format!("capture of {output} failed: {e:#}"),
+                };
+                warn!("{why}");
+                sink(CaptureEvent::Ended(why));
+            })?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    /// Stop and join. Idempotent.
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for CaptureThread {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn pixel_format(f: wl_shm::Format) -> PixelFormat {
+    match f {
+        wl_shm::Format::Argb8888 => PixelFormat::Argb8888,
+        wl_shm::Format::Xbgr8888 => PixelFormat::Xbgr8888,
+        wl_shm::Format::Abgr8888 => PixelFormat::Abgr8888,
+        _ => PixelFormat::Xrgb8888,
+    }
+}
+
 /// Capture `output_name` (or the first output) for `duration`, calling
-/// `on_frame` with each ready frame's pixels (tightly packed rows of
-/// `stride` bytes). Returns the number of frames delivered.
+/// `on_frame` with each ready frame's pixels (rows of `stride` bytes, copied
+/// out of the shm buffer once). Returns the number of frames delivered.
 pub fn capture_shm(
     output_name: Option<&str>,
     include_cursor: bool,
     duration: Duration,
     stop: Arc<AtomicBool>,
-    mut on_frame: impl FnMut(&FrameInfo, &[u8]),
+    mut on_frame: impl FnMut(&FrameInfo, Vec<u8>),
 ) -> Result<u64> {
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let mut queue = conn.new_event_queue::<State>();
@@ -356,8 +442,9 @@ pub fn capture_shm(
                 stride: b.stride,
                 format: b.format,
                 presentation_ns: st.frame_presentation,
+                ready_at: now,
             };
-            on_frame(&info, &pixels);
+            on_frame(&info, pixels);
             if let Some(f) = st.frame.take() {
                 f.destroy();
             }

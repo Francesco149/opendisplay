@@ -11,6 +11,7 @@
 //!
 //! VA-API (Intel/AMD) slots in as another FFmpeg backend ahead of x264.
 
+mod convert;
 mod ffmpeg;
 mod openh264;
 
@@ -20,6 +21,8 @@ use anyhow::{Result, bail};
 use clap::ValueEnum;
 use opendisplay_proto::video::AccessUnit;
 use tracing::{debug, info};
+
+use crate::backend::{Frame, FrameBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Backend {
@@ -129,19 +132,17 @@ impl Encoder {
         (self.width, self.height)
     }
 
-    /// Encode one BGRX/BGRA frame (`stride` bytes per row). Returns the
+    /// Encode one frame. Only CPU frames in BGRX/BGRA are supported; a
+    /// dmabuf frame is an error until a VA-API backend exists. Returns the
     /// pictures the encoder produced, in order: usually one, none when it
     /// skipped the frame or holds it, two when a lagging encoder catches up.
-    pub fn encode(
-        &mut self,
-        bgra: &[u8],
-        stride: u32,
-        force_idr: bool,
-        captured_at: Instant,
-    ) -> Result<Vec<Encoded>> {
+    pub fn encode(&mut self, frame: &Frame, force_idr: bool) -> Result<Vec<Encoded>> {
+        let FrameBuf::Cpu { pixels, stride, .. } = &frame.buf else {
+            bail!("{} cannot encode dmabuf frames", self.label());
+        };
         match &mut self.imp {
-            Imp::Ffmpeg(e) => e.encode(bgra, stride, force_idr, captured_at),
-            Imp::OpenH264(e) => e.encode(bgra, stride, force_idr, captured_at),
+            Imp::Ffmpeg(e) => e.encode(pixels, *stride, force_idr, frame.captured_at),
+            Imp::OpenH264(e) => e.encode(pixels, *stride, force_idr, frame.captured_at),
         }
     }
 }
