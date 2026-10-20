@@ -50,11 +50,19 @@ pub enum Dev {
     },
     /// Create a headless output, move the pointer onto it via the virtual
     /// pointer protocol and verify the position through Hyprland IPC.
+    /// With `--output`, use that existing output on any compositor with
+    /// zwlr_virtual_pointer_v1 instead (no IPC; the caller checks the result).
     InputTest {
         #[arg(long, default_value_t = 0.25)]
         x: f64,
         #[arg(long, default_value_t = 0.75)]
         y: f64,
+        /// Existing wl_output to move onto; skips Hyprland entirely.
+        #[arg(long)]
+        output: Option<String>,
+        /// With `--output`: keep the virtual pointer alive this long.
+        #[arg(long, default_value_t = 0.5)]
+        hold: f64,
     },
     /// Capture an output via ext-image-copy-capture into shm and report frame timing.
     CaptureTest {
@@ -105,7 +113,21 @@ pub fn run(cmd: Dev) -> Result<()> {
             bitrate_mbps,
             encoder: backend,
         } => encode_bench(width, height, frames, threads, bitrate_mbps, backend),
-        Dev::InputTest { x, y } => input_test(x, y),
+        Dev::InputTest {
+            x,
+            y,
+            output: Some(name),
+            hold,
+        } => {
+            let injector = input::InputInjector::start(&name, 1.0)?;
+            injector.move_to(x, y);
+            std::thread::sleep(Duration::from_secs_f64(hold));
+            info!("moved the virtual pointer to ({x},{y}) on {name}");
+            Ok(())
+        }
+        Dev::InputTest {
+            x, y, output: None, ..
+        } => input_test(x, y),
         Dev::Monitors => {
             let ipc = HyprlandIpc::from_env()?;
             info!("{}", ipc.version()?);
