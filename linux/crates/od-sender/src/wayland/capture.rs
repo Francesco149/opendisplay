@@ -250,25 +250,30 @@ impl CaptureThread {
         let handle = std::thread::Builder::new()
             .name("capture".into())
             .spawn(move || {
-                let r = capture_shm(
-                    Some(&output),
-                    opts.cursor,
-                    Duration::from_secs(u64::MAX / 4),
-                    thread_stop.clone(),
-                    |info, pixels| {
-                        sink(CaptureEvent::Frame(Frame {
-                            captured_at: info.ready_at,
-                            presentation_ns: info.presentation_ns,
-                            buf: FrameBuf::Cpu {
-                                pixels,
-                                width: info.width,
-                                height: info.height,
-                                stride: info.stride,
-                                format: pixel_format(info.format),
-                            },
-                        }));
-                    },
-                );
+                // A panic in here (or in the sink) must still tell the session
+                // that capture is gone, so it rebuilds instead of idling.
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    capture_shm(
+                        Some(&output),
+                        opts.cursor,
+                        Duration::from_secs(u64::MAX / 4),
+                        thread_stop.clone(),
+                        |info, pixels| {
+                            sink(CaptureEvent::Frame(Frame {
+                                captured_at: info.ready_at,
+                                presentation_ns: info.presentation_ns,
+                                buf: FrameBuf::Cpu {
+                                    pixels,
+                                    width: info.width,
+                                    height: info.height,
+                                    stride: info.stride,
+                                    format: pixel_format(info.format),
+                                },
+                            }));
+                        },
+                    )
+                }))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("capture thread panicked")));
                 if thread_stop.load(Ordering::Relaxed) {
                     if let Err(e) = r {
                         debug!("capture ended after stop: {e:#}");
