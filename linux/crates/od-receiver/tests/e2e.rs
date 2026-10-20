@@ -62,6 +62,10 @@ async fn null_sink_receives_stream_and_adopts_new_sender() {
     let task = tokio::spawn(rx.run(stop_rx));
 
     let s1 = od_fake_sender::run(sender_opts(addr, 1.0)).await.unwrap();
+    // run() returns once the last frame is written; give the receiver time to
+    // see the first connection close, or the second sender counts as
+    // replacing a live one (x86_64 runner on #298: adopted_over_live 2).
+    tokio::time::sleep(Duration::from_millis(300)).await;
     // A second sender while the first is gone, then a third overlapping one.
     let s2 = tokio::spawn(od_fake_sender::run(sender_opts(addr, 1.5)));
     tokio::time::sleep(Duration::from_millis(500)).await;
