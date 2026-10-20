@@ -46,8 +46,11 @@ impl MonitorFacts {
         )
     }
 
-    pub fn refresh_hz(&self) -> u32 {
-        ((self.refresh_mhz as f64) / 1000.0).round().max(1.0) as u32
+    /// Whole Hz, or `None` when the output does not know (headless and
+    /// virtual outputs report 0): announcing that as 1 Hz would cap the
+    /// sender at one frame per second.
+    pub fn refresh_hz(&self) -> Option<u32> {
+        (self.refresh_mhz >= 1000).then(|| ((self.refresh_mhz as f64) / 1000.0).round() as u32)
     }
 }
 
