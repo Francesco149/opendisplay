@@ -200,19 +200,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Render node (vgem)
+      # Optional here: some runner kernels ship no vgem module (6.17 azure
+      # did not), and headless Mutter may render without a node (Mesa
+      # surfaceless). The container gets /dev/dri only when it exists.
+      - name: Render node (vgem, optional)
         run: |
           sudo modprobe vgem || {
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe vgem
-          }
-          ls -l /dev/dri
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+              sudo modprobe vgem
+          } || echo "no vgem on $(uname -r); trying without a render node"
+          ls -l /dev/dri || true
 
       - name: GNOME smoke in an Arch container
         run: |
           mkdir -p "$RUNNER_TEMP/gnome-smoke"
-          docker run --rm --device /dev/dri \
+          dri=()
+          [ -e /dev/dri ] && dri=(--device /dev/dri)
+          docker run --rm "${dri[@]}" \
             -v "$PWD:/src" -v "$RUNNER_TEMP/gnome-smoke:/logs" \
             archlinux:latest bash /src/linux/testbench/gnome-ci-container.sh
 
