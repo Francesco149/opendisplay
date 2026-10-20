@@ -23,13 +23,15 @@
 # 1. `od-sender doctor` with XDG_CURRENT_DESKTOP=GNOME picks the gnome backend.
 # 2. `dev smoke --backend gnome`: a 1170x2532 virtual monitor (no dialog),
 #    PipeWire frames, x264, pointer input; afterwards the monitor is gone.
-# 3. Crash: `kill -9` a running sender; Mutter removes its monitor itself.
+# 3. `--scale 3 --position auto-left`: snapped to 2 (what Mutter offers for
+#    the mode) and placed left, through a temporary DisplayConfig change.
+# 4. Crash: `kill -9` a running sender; Mutter removes its monitor itself.
 set -euo pipefail
 
 if [ -z "${OD_GNOME_INNER:-}" ]; then
   sender="$(realpath "${1:?usage: $0 <od-sender> [<logdir>]}")"
   logdir="$(realpath -m "${2:-gnome-smoke-logs}")"
-  mkdir -p "$logdir" /tmp/claude-1001 2>/dev/null || mkdir -p "$logdir"
+  mkdir -p "$logdir"
   # Unix socket paths are limited to 108 bytes: keep the runtime dir short.
   B="$(mktemp -d "${TMPDIR:-/tmp}/odg.XXXX")"
   trap 'rm -rf "$B"' EXIT
@@ -96,7 +98,17 @@ grep -q "smoke ok: 30 frames captured" "$logs/smoke.log" || fail "smoke did not 
 grep -q "1170x2532" "$logs/smoke.log" || fail "virtual monitor not 1170x2532"
 [ "$(removed)" -gt "$before" ] || fail "virtual monitor not removed after smoke"
 
-echo "3. kill -9"
+echo "3. scale and position"
+before=$(removed)
+RUST_LOG=info "$OD_SENDER" dev smoke --backend gnome --size 1170x2532 --scale 3 --position auto-left \
+  --frames 5 --timeout 30 >"$logs/scale.log" 2>&1 || fail "scale smoke (see scale.log)"
+# 3 is not offered for 1170x2532 (Mutter: 1, 1.5, 2): the nearest is used,
+# and the monitor sits left of the headless one at 0,0.
+grep -q "using 2" "$logs/scale.log" || fail "scale 3 was not snapped to 2"
+grep -q "od-smoke = 1170x2532 @60 scale 2 at 0,0" "$logs/scale.log" || fail "not scale 2 at 0,0 (see scale.log)"
+[ "$(removed)" -gt "$before" ] || fail "virtual monitor not removed after scale smoke"
+
+echo "4. kill -9"
 before=$(removed)
 "$OD_SENDER" dev smoke --backend gnome --size 800x600 --frames 100000000 --timeout 120 \
   >"$logs/crash.log" 2>&1 &

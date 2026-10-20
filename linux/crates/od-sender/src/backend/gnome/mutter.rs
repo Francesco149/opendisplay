@@ -27,7 +27,7 @@ const DC_PATH: &str = "/org/gnome/Mutter/DisplayConfig";
 
 /// `cursor-mode` of `RecordVirtual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // hidden/metadata: `--cursor off` and the cursor side channel, later
+#[allow(dead_code)] // metadata: the cursor side channel, later
 pub enum CursorMode {
     Hidden = 0,
     Embedded = 1,
@@ -295,6 +295,38 @@ impl VirtualMonitor {
         }
         debug!("mutter virtual monitor {:?} node {}", vm.placement, vm.node);
         Ok(vm)
+    }
+
+    /// Set the monitor's scale (nearest one Mutter supports) and position
+    /// with a temporary DisplayConfig change; a no-op when Mutter already
+    /// placed it so. Returns the scale in effect.
+    pub fn arrange(&mut self, scale: f64, position: crate::backend::Position) -> Result<f64> {
+        use super::layout;
+        let state = display_state(&self.conn)?;
+        let (configs, scale) = layout::plan(&state, &self.placement.connector, scale, position)?;
+        let ours = configs
+            .iter()
+            .find(|c| c.monitors[0].0 == self.placement.connector)
+            .map(|c| (c.x, c.y));
+        let already = ours == Some((self.placement.x, self.placement.y))
+            && (self.placement.scale - scale).abs() < 1e-6;
+        if already {
+            return Ok(scale);
+        }
+        self.conn
+            .call_method(
+                Some(DC),
+                DC_PATH,
+                Some(DC),
+                "ApplyMonitorsConfig",
+                &layout::body(&state, configs),
+            )
+            .context("DisplayConfig.ApplyMonitorsConfig")?;
+        let state = display_state(&self.conn)?;
+        if let Some(p) = state.placement(&self.placement.connector) {
+            self.placement = p;
+        }
+        Ok(scale)
     }
 
     /// A handle for input calls, usable from another thread.

@@ -132,6 +132,12 @@ pub enum Dev {
         frames: u32,
         #[arg(long, default_value_t = 20.0)]
         timeout: f64,
+        /// Output scale to ask for.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f64,
+        /// Where the output goes.
+        #[arg(long, default_value = "auto-right")]
+        position: Position,
         #[command(flatten)]
         backend: crate::BackendArgs,
     },
@@ -245,10 +251,13 @@ pub fn run(cmd: Dev) -> Result<()> {
             size,
             frames,
             timeout,
+            scale,
+            position,
             backend,
         } => smoke(
             &backend.request(),
             &size,
+            (scale, position),
             frames,
             Duration::from_secs_f64(timeout),
         ),
@@ -697,7 +706,13 @@ fn parse_size(s: &str) -> Result<(u32, u32)> {
 
 /// TODO(§4.3): `--connect <addr>` to stream to `od-receiver --sink none`
 /// instead of encoding locally.
-fn smoke(req: &detect::Request, size: &str, frames: u32, timeout: Duration) -> Result<()> {
+fn smoke(
+    req: &detect::Request,
+    size: &str,
+    (scale, position): (f64, Position),
+    frames: u32,
+    timeout: Duration,
+) -> Result<()> {
     let (width, height) = parse_size(size)?;
     let mut backend = detect::detect(req)?;
     info!("smoke: backend {}", backend.describe());
@@ -706,8 +721,8 @@ fn smoke(req: &detect::Request, size: &str, frames: u32, timeout: Duration) -> R
         width,
         height,
         hz: 60,
-        scale: 1.0,
-        position: Position::AutoRight,
+        scale,
+        position,
     };
     let mut vd = backend.open(&spec)?;
     info!("smoke: display {}", vd.info());
