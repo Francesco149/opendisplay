@@ -4,6 +4,7 @@ mod discover;
 mod encoder;
 mod hyprland;
 mod input;
+mod latest;
 mod run;
 
 use std::time::{Duration, Instant};
