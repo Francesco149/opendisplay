@@ -4,9 +4,9 @@
 
 # OpenDisplay
 
-**Turn your spare Apple devices into second monitors for your Mac — free, open source, no subscription.**
+**Turn your spare devices into second monitors for your Mac — free, open source, no subscription.**
 
-iPhone, iPad, and spare Macs. A self-hosted
+iPhone, iPad, spare Macs, and Android (beta); a Linux sender is in beta too. A self-hosted
 alternative to Apple Sidecar, Duet Display, and Luna Display: true extended
 display (not just mirroring), Retina-sharp, over USB or WiFi, with touch and
 scroll input.
@@ -281,18 +281,32 @@ iPad, Android, or a spare Mac). The beta is tested on **Omarchy / Hyprland
 0.55+** (aarch64 and x86_64); **Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+**
 are experimental.
 
+An AUR package (`yay -S opendisplay-sender`) and prebuilt x86_64/aarch64
+tarballs are coming with the first `linux-v*` release; until then, build it
+from source ([linux/README.md#from-source](linux/README.md#from-source)) and
+run:
+
 ```sh
-yay -S opendisplay-sender
 od-sender run
 ```
 
 Setup, the supported matrix, Hyprland permission rules, known issues and how
 to report a problem are in [linux/README.md](linux/README.md).
 
+### Linux receiver (preview)
+
+`od-receiver` turns a Linux machine into the display. It runs today when built
+from source, with software decoding, and shows a Linux desktop sent by
+`od-sender`. Packages, hardware decoding, a full-screen kiosk mode and testing
+with the Mac sender come with its beta; progress is tracked in
+[#284](https://github.com/peetzweg/opendisplay/issues/284) and the plan in
+[linux/PLAN.md](linux/PLAN.md).
+
 ## Compatible apps
 
-The official apps cover a Mac sender, a Linux sender in beta (see above) and
-an iPhone/iPad receiver on iOS 15+.
+The official apps cover a Mac sender, a Linux sender in beta (see above),
+receivers for iPhone/iPad (iOS 15+), Mac and Android (beta), and a Linux
+receiver in preview.
 Other people have built their own clients that speak the same protocol, so
 you can also use an Android device or an older iPad as a display, or drive
 one from Linux. The wire protocol is specified in

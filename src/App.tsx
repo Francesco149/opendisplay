@@ -10,10 +10,14 @@ const APP_STORE_URL = "https://apps.apple.com/us/app/opendisplay/id6780264891"
 const ANDROID_BETA_GROUP_URL = "https://groups.google.com/g/opendisplay"
 const ANDROID_BETA_TESTER_URL = "https://play.google.com/apps/testing/com.peetzweg.opendisplay"
 // The Linux sender (od-sender) is a beta (Hyprland tested; Sway, KDE Plasma
-// and GNOME experimental), installed from the AUR. Its docs live next to the
-// code in linux/README.md.
+// and GNOME experimental). Until the AUR package and the first linux-v*
+// release exist it is built from source; the site says "coming" for both.
+// Its docs live next to the code in linux/README.md.
 const LINUX_README_URL = "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md"
-const RELEASES_URL = "https://github.com/peetzweg/opendisplay/releases"
+const LINUX_FROM_SOURCE_URL = `${LINUX_README_URL}#from-source`
+// The Linux receiver (od-receiver) is a preview: it runs from source with
+// software decoding; packages and a kiosk mode are planned (#284).
+const LINUX_RECEIVER_URL = "https://github.com/peetzweg/opendisplay/issues/284"
 
 const HERO_WORDS = [
   "partner's iPad",
@@ -201,7 +205,7 @@ export default function App() {
             scroll. No subscription. No dongle. No account. Android phones and tablets are
             in public beta, over WiFi, and so is a sender for Linux desktops.
           </p>
-          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; GPL-3.0</p>
+          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; Linux receiver (preview) &nbsp;·&nbsp; GPL-3.0</p>
         </div>
       </section>
 
@@ -238,19 +242,22 @@ export default function App() {
               </div>
               <div className="download-option">
                 <div className="platform">Linux <span className="beta-tag">Beta</span></div>
-                <p className="dl-sub">Extends a Linux desktop onto your devices.</p>
+                <p className="dl-sub">Extends a Linux desktop onto your iPhone, iPad, Mac or Android device.</p>
                 <a className="btn primary" href={LINUX_README_URL}>
                   Get started
                 </a>
                 <p className="note brew">
-                  From the AUR: <code>yay -S opendisplay-sender</code>
+                  Coming soon to the AUR as <code>yay -S opendisplay-sender</code>, with prebuilt
+                  x86_64 and aarch64 tarballs. Today:{" "}
+                  <a href={LINUX_FROM_SOURCE_URL}>build from source ↗</a>
                 </p>
                 <p className="note">
-                  Hyprland&nbsp;0.55+ tested · Sway&nbsp;1.10+, KDE&nbsp;Plasma&nbsp;6.8+, GNOME&nbsp;50+ experimental · aarch64 and x86_64.
+                  Tested on Omarchy / Hyprland&nbsp;0.55+. Experimental: Sway&nbsp;1.10+,
+                  KDE&nbsp;Plasma&nbsp;6.8+ (older Plasma&nbsp;6 through the packaged desktop entry),
+                  GNOME&nbsp;50+.
                 </p>
                 <p className="note">
-                  <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a> ·{" "}
-                  <a href={RELEASES_URL}>Releases ↗</a>
+                  <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a>
                 </p>
               </div>
             </div>
@@ -325,6 +332,22 @@ export default function App() {
                   <p className="note">
                     Android&nbsp;7.0 or later, over WiFi. Android&nbsp;5 and 6 support via a direct
                     download is coming.
+                  </p>
+                </div>
+              </div>
+              <div className="download-option">
+                <div className="receiver-visual-placeholder" aria-hidden="true" />
+                <div className="platform">Linux <span className="beta-tag">Preview</span></div>
+                <p className="dl-sub">Turns a Linux machine into a display.</p>
+                <a className="btn primary" href={LINUX_RECEIVER_URL}>
+                  Follow progress
+                </a>
+                <div className="receiver-copy">
+                  <p className="note">
+                    <code>od-receiver</code> runs today when built from source, with software
+                    decoding, and shows a Linux desktop sent by <code>od-sender</code>. Packages,
+                    hardware decoding, a full-screen kiosk mode and testing with the Mac sender
+                    come with the beta.
                   </p>
                 </div>
               </div>
@@ -527,9 +550,22 @@ export default function App() {
                 computer, accept, then install OpenDisplay from Google Play.</li>
               </ol>
               <p>Updates then arrive through Google Play like for any app. It connects over WiFi: open
-              the app, and pick the device in the Mac app. A USB cable isn't supported yet. Touch,
+              the app, and pick the device in the Mac app (or let <code>od-sender</code> find it on
+              Linux). A USB cable isn't supported yet. Touch,
               scroll and rotation work like on an iPad; HEVC is used when the device has a hardware
               decoder, H.264 otherwise. Android 5 and 6 support via a direct download is coming.</p>
+            </details>
+            <details>
+              <summary>Does it work on Linux?</summary>
+              <p>Yes, as a sender in beta: <code>od-sender</code> extends a Linux desktop onto any
+              OpenDisplay receiver, with touch coming back as pointer input. It is tested on
+              Omarchy / Hyprland 0.55 and newer; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are
+              experimental. An AUR package (<code>opendisplay-sender</code>) and prebuilt tarballs
+              are coming; until then it builds from source. See the{" "}
+              <a href={LINUX_README_URL}>Linux README</a> for setup and known issues.</p>
+              <p>A Linux <em>receiver</em>, which turns a Linux machine into the display, is in
+              preview: it runs from source today, and packages come with its beta.{" "}
+              <a href={LINUX_RECEIVER_URL}>Follow its progress</a>.</p>
             </details>
             <details>
               <summary>Can another Mac be the display?</summary>
@@ -590,7 +626,7 @@ export default function App() {
           <h2>Older iPads, Linux, and more Android.</h2>
           <p className="compat-lead">
             The official apps are a Mac sender, a Linux sender in beta, and receivers for iPhone,
-            iPad, Mac and Android.
+            iPad, Mac and Android, with a Linux receiver in preview.
             Other people have built their own clients that speak the same protocol, so you can also
             use an older iPad as a display, drive one from Linux, or try another Android receiver.
             If your hardware isn't covered yet, start here.
