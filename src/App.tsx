@@ -9,19 +9,18 @@ const APP_STORE_URL = "https://apps.apple.com/us/app/opendisplay/id6780264891"
 // opens for testers, so the site links the group and the tester opt-in page.
 const ANDROID_BETA_GROUP_URL = "https://groups.google.com/g/opendisplay"
 const ANDROID_BETA_TESTER_URL = "https://play.google.com/apps/testing/com.peetzweg.opendisplay"
-// The Linux sender (od-sender) is a beta (Hyprland tested; Sway, KDE Plasma
-// and GNOME experimental). Until the AUR package and the first linux-v*
-// release exist it is built from source; the site says "coming" for both.
-// Its docs live next to the code in linux/README.md.
+// The Linux sender (od-sender) and receiver (od-receiver) are betas, shipped
+// in the linux-v* pre-releases: sender tarballs with an installer, receiver
+// Flatpak bundles, and in-repo PKGBUILDs for Arch (the AUR package follows
+// once AUR registration reopens). Docs: linux/README.md.
 const LINUX_README_URL = "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md"
-const LINUX_FROM_SOURCE_URL = `${LINUX_README_URL}#from-source`
+const LINUX_ARCH_URL = `${LINUX_README_URL}#arch--omarchy-build-the-package`
+const LINUX_RECEIVER_URL = `${LINUX_README_URL}#linux-receiver-beta`
 // Linux releases are GitHub pre-releases, which releases/latest never shows.
-// Until linux-v0.1.0-beta.1 is tagged this lists none; then point it at
+// linux-v0.1.0-beta.1 was not tagged yet when this was written, so this
+// lists the linux-v* releases; once the tag exists, point it at
 // https://github.com/peetzweg/opendisplay/releases/tag/linux-v0.1.0-beta.1
 const LINUX_RELEASES_URL = "https://github.com/peetzweg/opendisplay/releases?q=linux-v&expanded=true"
-// The Linux receiver (od-receiver) is a preview: it runs from source with
-// software decoding; packages and a kiosk mode are planned (#284).
-const LINUX_RECEIVER_URL = "https://github.com/peetzweg/opendisplay/issues/284"
 
 const HERO_WORDS = [
   "partner's iPad",
@@ -209,7 +208,7 @@ export default function App() {
             scroll. No subscription. No dongle. No account. Android phones and tablets are
             in public beta, over WiFi, and so is a sender for Linux desktops.
           </p>
-          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; Linux receiver (preview) &nbsp;·&nbsp; GPL-3.0</p>
+          <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; Linux receiver (beta) &nbsp;·&nbsp; GPL-3.0</p>
         </div>
       </section>
 
@@ -250,13 +249,15 @@ export default function App() {
                   The OpenDisplay Linux sender adds a virtual display to your desktop and shows it on
                   your iPhone, iPad, Mac or Android device.
                 </p>
-                <a className="btn primary" href={LINUX_README_URL}>
-                  Get started
+                <a className="btn primary" href={LINUX_RELEASES_URL}>
+                  Download the beta
                 </a>
                 <p className="note brew">
-                  <code>yay -S opendisplay-sender</code> (available once linux-v0.1.0-beta.1 is
-                  tagged), or the x86_64 and aarch64 tarballs from the same pre-release. Today:{" "}
-                  <a href={LINUX_FROM_SOURCE_URL}>build from source ↗</a>
+                  Prebuilt x86_64 and aarch64 tarballs with an installer, for any distribution. On
+                  Arch / Omarchy you can build the package from the repository with makepkg.
+                </p>
+                <p className="note">
+                  <a href={LINUX_ARCH_URL}>Arch / Omarchy: build the package ↗</a>
                 </p>
                 <p className="note">
                   Tested on Omarchy / Hyprland&nbsp;0.56 on Apple silicon (Asahi); x86_64 expected
@@ -265,7 +266,7 @@ export default function App() {
                 </p>
                 <p className="note">
                   CPU-encoded on Linux for now (VA-API planned). The stream is not encrypted; use a
-                  network you trust.
+                  network you trust. An AUR package follows once AUR registration reopens.
                 </p>
                 <p className="note">
                   <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a> ·{" "}
@@ -349,17 +350,19 @@ export default function App() {
               </div>
               <div className="download-option">
                 <div className="receiver-visual-placeholder" aria-hidden="true" />
-                <div className="platform">Linux <span className="beta-tag">Preview</span></div>
-                <p className="dl-sub">Turns a Linux machine into a display.</p>
+                <div className="platform">Linux <span className="beta-tag">Beta</span></div>
+                <p className="dl-sub">
+                  Turns a Linux machine's screen into an extra display for a Mac or a Linux desktop.
+                </p>
                 <a className="btn primary" href={LINUX_RECEIVER_URL}>
-                  Follow progress
+                  Get started
                 </a>
                 <div className="receiver-copy">
                   <p className="note">
-                    <code>od-receiver</code> runs today when built from source, with software
-                    decoding, and shows a Linux desktop sent by <code>od-sender</code>. Packages,
-                    hardware decoding, a full-screen kiosk mode and testing with the Mac sender
-                    come with the beta.
+                    Tested windowed on Asahi Linux / Hyprland at 24&nbsp;ms end to end; other
+                    desktops expected to work. Install the Flatpak bundle from the{" "}
+                    <a href={LINUX_RELEASES_URL}>beta release ↗</a> (any distribution), or build
+                    the package on Arch / Omarchy.
                   </p>
                 </div>
               </div>
@@ -574,13 +577,13 @@ export default function App() {
               with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.56 on
               Apple silicon (Asahi), and x86_64 is expected to work; Sway 1.10+, KDE Plasma 6.8+
               and GNOME 50+ are experimental. It encodes on the CPU for now (VA-API is planned).
-              <code>yay -S opendisplay-sender</code> and prebuilt tarballs become available once
-              linux-v0.1.0-beta.1 is tagged; until then it builds from source. The stream is not
-              encrypted, so use a network you trust. See the{" "}
+              Install it from the linux-v0.1.0-beta.1 pre-release: a tarball with an installer for
+              any distribution, or on Arch / Omarchy the package built from the repository with
+              makepkg. The stream is not encrypted, so use a network you trust. See the{" "}
               <a href={LINUX_README_URL}>Linux README</a> for setup and known issues.</p>
               <p>A Linux <em>receiver</em>, which turns a Linux machine into the display, is in
-              preview: it runs from source today, and packages come with its beta.{" "}
-              <a href={LINUX_RECEIVER_URL}>Follow its progress</a>.</p>
+              beta too: a Flatpak bundle for any distribution, or the Arch package built with
+              makepkg. See the <a href={LINUX_RECEIVER_URL}>Linux receiver section</a>.</p>
             </details>
             <details>
               <summary>Can another Mac be the display?</summary>
@@ -641,7 +644,7 @@ export default function App() {
           <h2>Older iPads, Linux, and more Android.</h2>
           <p className="compat-lead">
             The official apps are a Mac sender, a Linux sender in beta, and receivers for iPhone,
-            iPad, Mac and Android, with a Linux receiver in preview.
+            iPad, Mac, Android (beta) and Linux (beta).
             Other people have built their own clients that speak the same protocol, so you can also
             use an older iPad as a display, drive one from Linux, or try another Android receiver.
             If your hardware isn't covered yet, start here.

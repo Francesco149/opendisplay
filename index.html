@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OpenDisplay: turn your spare iPhone, iPad, Mac or Android device into a second monitor for your Mac (free &amp; open source)</title>
-  <meta name="description" content="OpenDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare iPhone, iPad, Mac or Android device into a true extended display for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account. A Linux sender is in beta (Hyprland; Sway, KDE Plasma and GNOME experimental) and a Linux receiver in preview." />
+  <meta name="description" content="OpenDisplay is a free, open-source alternative to Apple Sidecar and Duet Display. Turn your spare iPhone, iPad, Mac or Android device into a true extended display for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account. A Linux sender and a Linux receiver are in beta (sender tested on Hyprland; Sway, KDE Plasma and GNOME experimental)." />
   <meta name="keywords" content="iPhone second monitor, iPad external display, Sidecar alternative, Duet Display alternative, free second screen Mac, open source, virtual display macOS, USB second display, use iPhone as monitor, Android tablet as Mac monitor, Android second screen for Mac" />
   <link rel="icon" type="image/png" href="./icon-256.png" />
   <link rel="canonical" href="https://opendisplay.app/" />
@@ -35,7 +35,7 @@
     "@type": "SoftwareApplication",
     "name": "OpenDisplay",
     "alternateName": "Open Display",
-    "operatingSystem": "macOS 14+, iPadOS 15+, iOS 15+, Android 7.0+ (beta), Linux (sender beta: Hyprland 0.55+; Sway 1.10+, KDE Plasma 6.8+, GNOME 50+ experimental; receiver preview)",
+    "operatingSystem": "macOS 14+, iPadOS 15+, iOS 15+, Android 7.0+ (beta), Linux (sender beta: Hyprland 0.55+; Sway 1.10+, KDE Plasma 6.8+, GNOME 50+ experimental; receiver beta)",
     "applicationCategory": "UtilitiesApplication",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
     "description": "Free, open-source alternative to Apple Sidecar, Duet Display and Luna Display: use your iPhone, iPad, Mac or Android device as a true second monitor (extended display, not a mirror) for your Mac over USB or WiFi. Retina-sharp, low latency, with touch and scroll input. No subscription, no dongle, no account.",
@@ -46,8 +46,7 @@
       "Retina / HiDPI (@2x) display matching the device panel",
       "Touch input: tap to click, drag, two-finger scroll",
       "Android receiver for phones and tablets, public beta on Google Play for Android 7.0 and later, over WiFi",
-      "OpenDisplay Linux sender in beta: tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), x86_64 expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ experimental; CPU encoding (VA-API planned); AUR package and tarballs once linux-v0.1.0-beta.1 is tagged",
-      "Linux receiver in preview: turn a Linux machine into a display, built from source",
+      "OpenDisplay Linux sender in beta: tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), x86_64 expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ experimental; CPU encoding (VA-API planned); prebuilt tarballs and an Arch PKGBUILD in the linux-v0.1.0-beta.1 pre-release; Linux receiver in beta (Flatpak)",
       "Portrait or landscape virtual display",
       "Hardware H.264 (VideoToolbox) low-latency pipeline",
       "Self-hosted and private — no servers, accounts or telemetry"
@@ -126,7 +125,7 @@
         "name": "Does it work on Linux?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Yes, as a sender in beta: the OpenDisplay Linux sender (od-sender) adds a virtual display to a Linux desktop and shows it on any OpenDisplay receiver, with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), and x86_64 is expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are experimental. It encodes on the CPU for now (VA-API is planned). yay -S opendisplay-sender and prebuilt tarballs become available once linux-v0.1.0-beta.1 is tagged; until then it builds from source. The stream is not encrypted, so use a network you trust. A Linux receiver, which turns a Linux machine into the display, is in preview: it runs from source today, and packages come with its beta."
+          "text": "Yes, as a sender in beta: the OpenDisplay Linux sender (od-sender) adds a virtual display to a Linux desktop and shows it on any OpenDisplay receiver, with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), and x86_64 is expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are experimental. It encodes on the CPU for now (VA-API is planned). Install it from the linux-v0.1.0-beta.1 pre-release: a tarball with an installer for any distribution, or on Arch / Omarchy the package built from the repository with makepkg. The stream is not encrypted, so use a network you trust. A Linux receiver, which turns a Linux machine into the display, is in beta too: a Flatpak bundle for any distribution, or the Arch package built with makepkg."
         }
       },
       {
