@@ -105,6 +105,150 @@ pub struct Hello {
     pub display_max_frame_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_caps: Option<Vec<VideoCap>>,
+    /// Panel facts (§6.7). Never fails the `hello`: a malformed object comes
+    /// back as a [`Panel`] whose [`Panel::facts`] is `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_panel"
+    )]
+    pub panel: Option<Panel>,
+    /// Power actions the receiver obeys on this session (§6.6). Parsed so a
+    /// malformed list never fails the `hello`; non-string entries are dropped.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_power"
+    )]
+    pub power: Option<Vec<String>>,
+}
+
+impl Hello {
+    /// The validated panel facts, or `None` when `panel` is absent or fails
+    /// §6.7 validation (then the sender falls back to the deprecated fields).
+    pub fn panel_facts(&self) -> Option<PanelFacts> {
+        self.panel.as_ref().and_then(Panel::facts)
+    }
+
+    /// `panel` was sent but is ignored as a whole (§6.7), worth logging once.
+    pub fn has_invalid_panel(&self) -> bool {
+        self.panel.is_some() && self.panel_facts().is_none()
+    }
+}
+
+/// `hello.panel` as sent (§6.7). Fields that are absent or not of the
+/// expected kind are `None`, which invalidates the whole object.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Panel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels_wide: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels_high: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points_wide: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points_high: Option<u32>,
+    /// Set when a field was present but not a usable number (a string, a
+    /// fraction for an integer field, out of range): the object is invalid
+    /// even though that field reads as absent.
+    #[serde(skip)]
+    pub malformed: bool,
+}
+
+/// Validated §6.7 facts, in the receiver's current orientation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelFacts {
+    /// Physical pixels lit 1:1: no stream needs to be larger.
+    pub pixels_wide: u32,
+    pub pixels_high: u32,
+    /// The real backing scale; may be fractional.
+    pub scale: f64,
+    /// The desktop size the receiver itself runs (a Mac's "looks like").
+    pub points: Option<(u32, u32)>,
+}
+
+impl Panel {
+    /// §6.7: pixels integers of at least 2, `scale` finite above 0, points
+    /// both absent or both integers of at least 2. Otherwise the whole object
+    /// is ignored, never part of it.
+    pub fn facts(&self) -> Option<PanelFacts> {
+        if self.malformed {
+            return None;
+        }
+        let (w, h, scale) = (self.pixels_wide?, self.pixels_high?, self.scale?);
+        if w < 2 || h < 2 || !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let points = match (self.points_wide, self.points_high) {
+            (None, None) => None,
+            (Some(pw), Some(ph)) if pw >= 2 && ph >= 2 => Some((pw, ph)),
+            _ => return None,
+        };
+        Some(PanelFacts {
+            pixels_wide: w,
+            pixels_high: h,
+            scale,
+            points,
+        })
+    }
+}
+
+fn lenient_panel<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Panel>, D::Error> {
+    let value = Value::deserialize(d)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let mut panel = Panel::default();
+    let Some(obj) = value.as_object() else {
+        panel.malformed = true;
+        return Ok(Some(panel));
+    };
+    let mut int = |key: &str| -> Option<u32> {
+        let v = obj.get(key)?;
+        let n = v
+            .as_number()
+            .and_then(|n| number_to_u64(n, "u32").ok())
+            .and_then(|n| u32::try_from(n).ok());
+        if n.is_none() {
+            panel.malformed = true;
+        }
+        n
+    };
+    let (pw, ph) = (int("pixelsWide"), int("pixelsHigh"));
+    let (qw, qh) = (int("pointsWide"), int("pointsHigh"));
+    panel.pixels_wide = pw;
+    panel.pixels_high = ph;
+    panel.points_wide = qw;
+    panel.points_high = qh;
+    panel.scale = match obj.get("scale") {
+        None => None,
+        Some(v) => {
+            let s = v.as_f64();
+            if s.is_none() {
+                panel.malformed = true;
+            }
+            s
+        }
+    };
+    Ok(Some(panel))
+}
+
+fn lenient_power<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Array(items) => Some(
+            items
+                .into_iter()
+                .filter_map(|v| match v {
+                    Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    })
 }
 
 /// One `hello.videoCaps` entry (§6.5). All limits present apply together.
@@ -462,6 +606,108 @@ mod tests {
             h.video_caps.unwrap()[0].max_pixels_per_second,
             Some(530_841_600)
         );
+    }
+
+    fn hello(json: &str) -> Hello {
+        match ControlMessage::parse(json.as_bytes()) {
+            Ok(ControlMessage::Hello(h)) => h,
+            other => panic!("{json}: {other:?}"),
+        }
+    }
+
+    fn with_panel(panel: &str) -> Hello {
+        hello(&format!(
+            r#"{{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2,"panel":{panel}}}"#
+        ))
+    }
+
+    #[test]
+    fn parses_panel_facts() {
+        // The Mac receiver's shape (MacReceiver.swift `announcePanel`).
+        let h = with_panel(
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":2,"pointsWide":2560,"pointsHigh":1440,"future":1}"#,
+        );
+        assert_eq!(
+            h.panel_facts(),
+            Some(PanelFacts {
+                pixels_wide: 5120,
+                pixels_high: 2880,
+                scale: 2.0,
+                points: Some((2560, 1440)),
+            })
+        );
+        assert!(!h.has_invalid_panel());
+        // iOS: no points; a fractional scale and float-typed integers are fine.
+        let h = with_panel(r#"{"pixelsWide":2556.0,"pixelsHigh":1179,"scale":2.608}"#);
+        let f = h.panel_facts().unwrap();
+        assert_eq!(
+            (f.pixels_wide, f.pixels_high, f.scale, f.points),
+            (2556, 1179, 2.608, None)
+        );
+        // Absent panel: nothing to ignore.
+        let h = hello(r#"{"type":"hello","pixelsWide":2732,"pixelsHigh":2048,"scale":2}"#);
+        assert_eq!(h.panel, None);
+        assert!(!h.has_invalid_panel());
+        let h = with_panel("null");
+        assert_eq!(h.panel, None);
+    }
+
+    #[test]
+    fn invalid_panel_is_ignored_whole_and_never_fails_the_hello() {
+        for panel in [
+            r#"{"pixelsHigh":2880,"scale":2}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880}"#,
+            r#"{"pixelsWide":1,"pixelsHigh":2880,"scale":2}"#,
+            r#"{"pixelsWide":-5120,"pixelsHigh":2880,"scale":2}"#,
+            r#"{"pixelsWide":5120.5,"pixelsHigh":2880,"scale":2}"#,
+            r#"{"pixelsWide":"5120","pixelsHigh":2880,"scale":2}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":0}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":-1}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":"2"}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":2,"pointsWide":2560}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":2,"pointsWide":2560,"pointsHigh":1}"#,
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":2,"pointsWide":2560,"pointsHigh":null}"#,
+            r#"{"pixelsWide":99999999999,"pixelsHigh":2880,"scale":2}"#,
+            r#""5120x2880""#,
+            r#"[5120,2880,2]"#,
+        ] {
+            let h = with_panel(panel);
+            assert!(h.has_invalid_panel(), "{panel}");
+            assert_eq!(h.panel_facts(), None, "{panel}");
+            // The deprecated fields still carry the hello.
+            assert_eq!((h.pixels_wide, h.pixels_high), (5120, 2880), "{panel}");
+        }
+    }
+
+    #[test]
+    fn power_is_parsed_leniently() {
+        let h = hello(
+            r#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2,"power":["shutdown","reboot"]}"#,
+        );
+        assert_eq!(h.power, Some(vec!["shutdown".into(), "reboot".into()]));
+        let h = hello(
+            r#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2,"power":["shutdown",7]}"#,
+        );
+        assert_eq!(h.power, Some(vec!["shutdown".into()]));
+        let h = hello(
+            r#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2,"power":"shutdown"}"#,
+        );
+        assert_eq!(h.power, None);
+        let h = hello(r#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2}"#);
+        assert_eq!(h.power, None);
+    }
+
+    #[test]
+    fn hello_with_panel_round_trips() {
+        let h = with_panel(
+            r#"{"pixelsWide":5120,"pixelsHigh":2880,"scale":2,"pointsWide":2560,"pointsHigh":1440}"#,
+        );
+        let p = ControlMessage::Hello(h.clone()).to_payload().unwrap();
+        assert_eq!(
+            p,
+            br#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2.0,"panel":{"pixelsWide":5120,"pixelsHigh":2880,"scale":2.0,"pointsWide":2560,"pointsHigh":1440}}"#
+        );
+        assert_eq!(ControlMessage::parse(&p).unwrap(), ControlMessage::Hello(h));
     }
 
     #[test]
