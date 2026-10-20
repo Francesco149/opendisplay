@@ -71,7 +71,18 @@ pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
     };
     if supported {
         match detect::instantiate(walk.decision.clone()) {
-            Ok(b) => println!("  {}: {}\n  {}", b.id(), b.describe(), b.caps()),
+            Ok(b) => {
+                println!("  {}: {}\n  {}", b.id(), b.describe(), b.caps());
+                let snap = snapshot.as_ref().and_then(|s| s.as_ref().ok());
+                match detect::choose_capture(b.as_ref(), req.capture, snap) {
+                    Ok(Some(sel)) => println!("  capture: {} ({})", sel.path, sel.reason),
+                    Ok(None) => println!("  capture: n/a (PipeWire)"),
+                    Err(e) => {
+                        println!("  capture: none ({e:#})");
+                        supported = false;
+                    }
+                }
+            }
             Err(e) => {
                 println!("  cannot start the backend: {e:#}");
                 supported = false;
@@ -201,10 +212,11 @@ fn config_report(explicit: Option<&Path>) -> bool {
                 println!("  to {}", opt(c.to.clone()));
                 println!("  {}", layer_line(&c.defaults));
                 println!(
-                    "  max-fps {}, encoder {}, cursor {}",
+                    "  max-fps {}, encoder {}, cursor {}, capture {}",
                     opt(c.max_fps.map(|f| f.to_string())),
                     opt(c.encoder.map(|e| format!("{e:?}"))),
-                    opt(c.cursor.map(|m| format!("{m:?}").to_lowercase()))
+                    opt(c.cursor.map(|m| format!("{m:?}").to_lowercase())),
+                    opt(c.capture.map(|m| format!("{m:?}").to_lowercase()))
                 );
                 for (k, l) in &c.receivers {
                     println!("  [receiver.\"{k}\"] {}", layer_line(l));

@@ -15,6 +15,7 @@ use tracing::{info, warn};
 
 use self::display::WlrootsOutput;
 use self::ipc::SwayIpc;
+use super::capture::CapturePath;
 use super::lock::{lock_output, try_lock};
 use super::{Backend, BackendId, Caps, DisplaySpec, VirtualDisplay};
 use crate::wayland::display::CapturedDisplay;
@@ -25,6 +26,7 @@ pub const MIN_VERSION: (u32, u32) = (1, 10);
 pub struct WlrootsBackend {
     ipc: SwayIpc,
     version: String,
+    capture: CapturePath,
 }
 
 impl WlrootsBackend {
@@ -40,6 +42,7 @@ impl WlrootsBackend {
         Ok(Self {
             ipc,
             version: v.human_readable,
+            capture: CapturePath::Ext,
         })
     }
 }
@@ -66,10 +69,14 @@ impl Backend for WlrootsBackend {
         }
     }
 
+    fn set_capture(&mut self, path: CapturePath) {
+        self.capture = path;
+    }
+
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
         let lock = lock_output(&spec.name)?;
         let output = WlrootsOutput::open(self.ipc.clone(), spec)?;
-        Ok(Box::new(CapturedDisplay::new(output, lock)))
+        Ok(Box::new(CapturedDisplay::new(output, lock, self.capture)))
     }
 
     /// Unplug outputs recorded by senders that are no longer running. Outputs

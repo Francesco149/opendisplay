@@ -31,6 +31,13 @@ pub fn output_name(lock_name: &str) -> String {
 pub struct KdeBackend;
 
 impl Backend for KdeBackend {
+    /// Frames come over PipeWire, not a Wayland capture protocol.
+    fn wayland_capture(&self) -> bool {
+        false
+    }
+
+    fn set_capture(&mut self, _: super::capture::CapturePath) {}
+
     fn id(&self) -> BackendId {
         BackendId::Kde
     }

@@ -6,11 +6,12 @@ pub mod cursor;
 pub mod display;
 pub mod input;
 pub mod registry;
+pub mod screencopy;
 pub mod shm_pool;
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use wayland_client::Connection;
 
 /// `blocking_dispatch` with an upper bound, so a capture of a static output
@@ -33,7 +34,14 @@ pub fn dispatch_with_timeout<S>(
     // SAFETY: pollfd points at one valid struct for the duration of the call.
     let r = unsafe { libc_poll(&mut pfd, 1, timeout.as_millis() as i32) };
     if r > 0 {
-        let _ = guard.read();
+        // A dead connection (e.g. after a protocol error) must end the
+        // caller's loop instead of spinning on it.
+        match guard.read() {
+            Ok(_) => {}
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e).context("reading from the compositor"),
+        }
         queue.dispatch_pending(st)?;
     }
     Ok(())

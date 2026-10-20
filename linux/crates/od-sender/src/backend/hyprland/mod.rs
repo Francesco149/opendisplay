@@ -12,6 +12,7 @@ use tracing::warn;
 
 use self::display::HyprlandOutput;
 use self::ipc::HyprlandIpc;
+use super::capture::{CapturePath, Preference};
 use super::lock::{lock_output, try_lock};
 use super::{Backend, BackendId, Caps, DisplaySpec, VirtualDisplay};
 use crate::wayland::display::CapturedDisplay;
@@ -21,9 +22,27 @@ pub const MIN_VERSION: (u32, u32) = (0, 55);
 /// Newest minor release the sender was run against.
 pub const TESTED_UP_TO: (u32, u32) = (0, 56);
 
+/// First release whose ext-image-copy-capture frame constructor no longer
+/// dereferences a removed output's monitor (fixed on main after 0.56.2).
+pub const EXT_CAPTURE_SAFE_FROM: (u32, u32) = (0, 57);
+
+/// Hyprland before [`EXT_CAPTURE_SAFE_FROM`] (or of unknown version) captures
+/// through wlr-screencopy (backend/capture.rs).
+pub fn capture_preference(version: Option<(u32, u32, u32)>) -> Preference {
+    const WHY: &str = "Hyprland < 0.57 can crash when an output is removed under an \
+        ext-image-copy-capture frame request; its wlr-screencopy path is safe";
+    match version {
+        Some((maj, min, _)) if (maj, min) >= EXT_CAPTURE_SAFE_FROM => None,
+        _ => Some((CapturePath::Wlr, WHY)),
+    }
+}
+
 pub struct HyprlandBackend {
     socket: PathBuf,
     version: String,
+    /// Parsed `version`, for the capture choice.
+    triple: Option<(u32, u32, u32)>,
+    capture: CapturePath,
 }
 
 impl HyprlandBackend {
@@ -48,7 +67,9 @@ impl HyprlandBackend {
         }
         Ok(Self {
             socket,
+            triple: v.triple(),
             version: v.version,
+            capture: CapturePath::Ext,
         })
     }
 
@@ -81,10 +102,18 @@ impl Backend for HyprlandBackend {
         }
     }
 
+    fn capture_preference(&self) -> Preference {
+        capture_preference(self.triple)
+    }
+
+    fn set_capture(&mut self, path: CapturePath) {
+        self.capture = path;
+    }
+
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
         let lock = lock_output(&spec.name)?;
         let output = HyprlandOutput::open(self.ipc(), spec)?;
-        Ok(Box::new(CapturedDisplay::new(output, lock)))
+        Ok(Box::new(CapturedDisplay::new(output, lock, self.capture)))
     }
 
     fn clean(&mut self) -> Result<Vec<String>> {
@@ -103,5 +132,29 @@ impl Backend for HyprlandBackend {
             removed.push(m.name);
         }
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wlr_capture_before_0_57() {
+        assert_eq!(
+            capture_preference(Some((0, 56, 2))).map(|p| p.0),
+            Some(CapturePath::Wlr)
+        );
+        assert_eq!(
+            capture_preference(Some((0, 55, 0))).map(|p| p.0),
+            Some(CapturePath::Wlr)
+        );
+        // Unknown version: the safe side.
+        assert_eq!(
+            capture_preference(None).map(|p| p.0),
+            Some(CapturePath::Wlr)
+        );
+        assert_eq!(capture_preference(Some((0, 57, 0))), None);
+        assert_eq!(capture_preference(Some((1, 0, 0))), None);
     }
 }

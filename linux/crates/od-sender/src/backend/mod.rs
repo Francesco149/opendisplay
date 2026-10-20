@@ -3,6 +3,7 @@
 //! startup by [`detect`]; the session loop only sees the traits below.
 
 pub mod adopt;
+pub mod capture;
 pub mod detect;
 #[cfg(feature = "gnome")]
 pub mod gnome;
@@ -158,6 +159,19 @@ pub trait Backend: Send {
     /// One line for logs and `doctor`.
     fn describe(&self) -> String;
     fn caps(&self) -> Caps;
+    /// Frames come through a Wayland capture protocol (`wayland/capture.rs`,
+    /// `wayland/screencopy.rs`); false for PipeWire backends, which ignore
+    /// the capture choice.
+    fn wayland_capture(&self) -> bool {
+        true
+    }
+    /// A reason to capture with something other than the default protocol
+    /// (backend/capture.rs); `None` = no preference.
+    fn capture_preference(&self) -> capture::Preference {
+        None
+    }
+    /// The capture protocol the displays this backend opens will use.
+    fn set_capture(&mut self, path: capture::CapturePath);
     /// Create (or adopt an unlocked leftover) and size the virtual output.
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>>;
     /// Remove `od-*` outputs that no running sender holds a lock on.

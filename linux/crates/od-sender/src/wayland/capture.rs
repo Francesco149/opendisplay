@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use super::dispatch_with_timeout;
 use super::shm_pool::{Lease, Mapping, Recycler};
+use crate::backend::capture::CapturePath;
 use crate::backend::{
     CaptureEvent, CaptureOptions, Frame, FrameBuf, FrameSink, PixelFormat, Pixels,
 };
@@ -44,27 +45,31 @@ pub struct FrameInfo {
 /// Buffers the compositor may be writing, lent out or free at once: one
 /// attached, one waiting in the encoder's latest-wins slot, one being
 /// encoded and the last one kept for an IDR replay on a static screen.
-const MAX_BUFFERS: usize = 4;
+pub(super) const MAX_BUFFERS: usize = 4;
 
-struct ShmBuffer {
-    map: Arc<Mapping>,
+/// One mapped `wl_shm` buffer (shared with `screencopy.rs`).
+pub(super) struct ShmBuffer {
+    pub(super) map: Arc<Mapping>,
     pool: wl_shm_pool::WlShmPool,
-    buffer: wl_buffer::WlBuffer,
-    width: u32,
-    height: u32,
-    stride: u32,
-    format: wl_shm::Format,
+    pub(super) buffer: wl_buffer::WlBuffer,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) stride: u32,
+    pub(super) format: wl_shm::Format,
 }
 
 impl ShmBuffer {
-    fn new(
+    pub(super) fn new<D>(
         shm: &wl_shm::WlShm,
-        qh: &QueueHandle<State>,
+        qh: &QueueHandle<D>,
         width: u32,
         height: u32,
+        stride: u32,
         format: wl_shm::Format,
-    ) -> Result<Self> {
-        let stride = width * 4;
+    ) -> Result<Self>
+    where
+        D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
+    {
         let size = (stride * height) as u64;
         let path = format!(
             "/dev/shm/od-capture-{}-{}",
@@ -264,7 +269,12 @@ pub struct CaptureThread {
 }
 
 impl CaptureThread {
-    pub fn spawn(output: &str, opts: CaptureOptions, mut sink: FrameSink) -> Result<Self> {
+    pub fn spawn(
+        output: &str,
+        opts: CaptureOptions,
+        path: CapturePath,
+        mut sink: FrameSink,
+    ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let output = output.to_string();
@@ -274,25 +284,36 @@ impl CaptureThread {
                 // A panic in here (or in the sink) must still tell the session
                 // that capture is gone, so it rebuilds instead of idling.
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    capture_shm(
-                        Some(&output),
-                        opts.cursor,
-                        Duration::from_secs(u64::MAX / 4),
-                        thread_stop.clone(),
-                        |info, lease| {
-                            sink(CaptureEvent::Frame(Frame {
-                                captured_at: info.ready_at,
-                                presentation_ns: info.presentation_ns,
-                                buf: FrameBuf::Cpu {
-                                    pixels: Pixels::Leased(Box::new(lease)),
-                                    width: info.width,
-                                    height: info.height,
-                                    stride: info.stride,
-                                    format: pixel_format(info.format),
-                                },
-                            }));
-                        },
-                    )
+                    let on_frame = |info: &FrameInfo, lease: Lease| {
+                        sink(CaptureEvent::Frame(Frame {
+                            captured_at: info.ready_at,
+                            presentation_ns: info.presentation_ns,
+                            buf: FrameBuf::Cpu {
+                                pixels: Pixels::Leased(Box::new(lease)),
+                                width: info.width,
+                                height: info.height,
+                                stride: info.stride,
+                                format: pixel_format(info.format),
+                            },
+                        }));
+                    };
+                    let forever = Duration::from_secs(u64::MAX / 4);
+                    match path {
+                        CapturePath::Ext => capture_shm(
+                            Some(&output),
+                            opts.cursor,
+                            forever,
+                            thread_stop.clone(),
+                            on_frame,
+                        ),
+                        CapturePath::Wlr => super::screencopy::capture_wlr(
+                            &output,
+                            opts.cursor,
+                            forever,
+                            thread_stop.clone(),
+                            on_frame,
+                        ),
+                    }
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("capture thread panicked")));
                 if thread_stop.load(Ordering::Relaxed) {
@@ -329,7 +350,7 @@ impl Drop for CaptureThread {
     }
 }
 
-fn pixel_format(f: wl_shm::Format) -> PixelFormat {
+pub(super) fn pixel_format(f: wl_shm::Format) -> PixelFormat {
     match f {
         wl_shm::Format::Argb8888 => PixelFormat::Argb8888,
         wl_shm::Format::Xbgr8888 => PixelFormat::Xbgr8888,
@@ -441,6 +462,7 @@ pub fn capture_shm(
                         &qh,
                         st.session.width,
                         st.session.height,
+                        st.session.width * 4,
                         format,
                     )?);
                     debug!(
