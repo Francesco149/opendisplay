@@ -4,6 +4,7 @@ mod dev;
 mod discover;
 mod doctor;
 mod encoder;
+mod latest;
 mod session;
 mod wayland;
 

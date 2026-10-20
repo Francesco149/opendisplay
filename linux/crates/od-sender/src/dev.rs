@@ -277,9 +277,9 @@ fn capture_test(
         cursor,
         Duration::from_secs_f64(seconds),
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        |info: &capture::FrameInfo, pixels: &[u8]| {
+        |info: &capture::FrameInfo, pixels: Vec<u8>| {
             if save.is_some() {
-                last = Some((*info, pixels.to_vec()));
+                last = Some((*info, pixels));
             }
         },
     )?;

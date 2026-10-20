@@ -192,7 +192,7 @@ pub enum PixelFormat {
 }
 
 pub struct Frame {
-    /// Taken in the capture callback, after the compositor's copy.
+    /// When the compositor reported the frame ready, before it is copied out.
     pub captured_at: Instant,
     /// Compositor presentation time, if reported.
     #[allow(dead_code)] // for the cursor side channel and latency stats

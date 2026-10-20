@@ -24,6 +24,7 @@ use crate::backend::{
 };
 use crate::desktop::{self, Debounce, DesktopOptions, DesktopPlan, PlanError, StreamPlan};
 use crate::encoder::{Encoded, Encoder, EncoderSettings};
+use crate::latest;
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -134,7 +135,7 @@ impl LossBudget {
 struct EncodePipeline {
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
-    raw_tx: Option<std::sync::mpsc::SyncSender<Frame>>,
+    raw_tx: Option<latest::Sender<Frame>>,
     encoded_rx: mpsc::Receiver<Encoded>,
     lost_tx: mpsc::UnboundedSender<String>,
     lost_rx: mpsc::UnboundedReceiver<String>,
@@ -144,7 +145,7 @@ impl EncodePipeline {
     fn start(mut settings: EncoderSettings) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let force_idr = Arc::new(AtomicBool::new(true));
-        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<Frame>(1);
+        let (raw_tx, raw_rx) = latest::channel::<Frame>();
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(4);
         let (lost_tx, lost_rx) = mpsc::unbounded_channel();
         let enc_stop = stop.clone();
@@ -242,14 +243,15 @@ impl EncodePipeline {
         })
     }
 
-    /// The capture side: drops a frame when the encoder is busy, reports
-    /// the end of capture to the session.
+    /// The capture side: a frame replaces one the busy encoder has not
+    /// taken yet, so encoding starts on the newest picture; reports the end
+    /// of capture to the session.
     fn sink(&mut self) -> FrameSink {
         let raw_tx = self.raw_tx.take().expect("one sink per pipeline");
         let lost_tx = self.lost_tx.clone();
         Box::new(move |ev| match ev {
             CaptureEvent::Frame(f) => {
-                let _ = raw_tx.try_send(f);
+                raw_tx.send(f);
             }
             CaptureEvent::Ended(why) => {
                 let _ = lost_tx.send(why);

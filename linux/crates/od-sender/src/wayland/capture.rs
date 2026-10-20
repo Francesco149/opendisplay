@@ -32,6 +32,8 @@ pub struct FrameInfo {
     pub format: wl_shm::Format,
     /// Compositor presentation time of this frame, if reported.
     pub presentation_ns: Option<u128>,
+    /// When the compositor said the frame was ready, before we copy it out.
+    pub ready_at: Instant,
 }
 
 struct ShmBuffer {
@@ -255,10 +257,10 @@ impl CaptureThread {
                     thread_stop.clone(),
                     |info, pixels| {
                         sink(CaptureEvent::Frame(Frame {
-                            captured_at: Instant::now(),
+                            captured_at: info.ready_at,
                             presentation_ns: info.presentation_ns,
                             buf: FrameBuf::Cpu {
-                                pixels: pixels.to_vec(),
+                                pixels,
                                 width: info.width,
                                 height: info.height,
                                 stride: info.stride,
@@ -311,14 +313,14 @@ fn pixel_format(f: wl_shm::Format) -> PixelFormat {
 }
 
 /// Capture `output_name` (or the first output) for `duration`, calling
-/// `on_frame` with each ready frame's pixels (tightly packed rows of
-/// `stride` bytes). Returns the number of frames delivered.
+/// `on_frame` with each ready frame's pixels (rows of `stride` bytes, copied
+/// out of the shm buffer once). Returns the number of frames delivered.
 pub fn capture_shm(
     output_name: Option<&str>,
     include_cursor: bool,
     duration: Duration,
     stop: Arc<AtomicBool>,
-    mut on_frame: impl FnMut(&FrameInfo, &[u8]),
+    mut on_frame: impl FnMut(&FrameInfo, Vec<u8>),
 ) -> Result<u64> {
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let mut queue = conn.new_event_queue::<State>();
@@ -435,8 +437,9 @@ pub fn capture_shm(
                 stride: b.stride,
                 format: b.format,
                 presentation_ns: st.frame_presentation,
+                ready_at: now,
             };
-            on_frame(&info, &pixels);
+            on_frame(&info, pixels);
             if let Some(f) = st.frame.take() {
                 f.destroy();
             }

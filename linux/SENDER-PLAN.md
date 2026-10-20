@@ -304,6 +304,15 @@ the website can offer a generic tarball and a `-bin` package. B is a trap.
 Keep `--no-default-features` style escape hatches out of the sender: OpenH264
 is already the floor when FFmpeg lacks libx264.
 
+*Status 2026-10-20:* C landed for the release tarballs.
+`linux/packaging/ffmpeg/build-static.sh` builds a minimal static FFmpeg
+n9.0.2 (encoders `libx264` + `h264_v4l2m2m` only) and a static x264 r3222;
+`linux-release.yml` links od-sender against it via `FFMPEG_DIR` and fails on
+any NEEDED library beyond glibc/libgcc/libstdc++. On aarch64 the stripped
+binary is 7.3 MB, with encode cost unchanged within noise. The x86_64
+build is still unverified until CI runs. The AUR package (A) still links
+the system FFmpeg.
+
 ### 3.6 Desktop policy (shared layer, needed at beta)
 
 `desktop.rs` turns `hello` into a `DesktopPlan` the way `Mac/DesktopPolicy.swift`
