@@ -677,8 +677,9 @@ What that means for `od-sender`, in priority order:
    a dialog (Deny / Allow until the app exits / Allow until Hyprland exits);
    a denied client is **not refused, it receives black frames with a
    "permission denied" caption**, so the sender would stream a black
-   display; rules are `hl.permission({ binary = "<regex>", type =
-   "screencopy", mode = "allow" })` and are only read at startup (from the
+   display; rules are `hl.permission("<binary regex>", "screencopy",
+   "allow")` (positional form, as in `/usr/share/hypr/hyprland.lua`) and are
+   only read at startup (from the
    Hyprland wiki and the binary's `PERMISSION_TYPE_SCREENCOPY`/`KEYBOARD`
    strings; virtual-pointer input has no permission type, so it is not
    gated — *inferred* from those strings). Actions: `doctor` reads the
