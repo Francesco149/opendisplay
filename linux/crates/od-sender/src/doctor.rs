@@ -51,6 +51,10 @@ pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
             wlroots_report();
             true
         }
+        Decision::Kde => {
+            println!("  => kde");
+            true
+        }
         Decision::Adopt { output } => {
             println!("  => adopt output {output}");
             true

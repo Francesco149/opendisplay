@@ -5,6 +5,8 @@
 pub mod adopt;
 pub mod detect;
 pub mod hyprland;
+#[cfg(feature = "kde")]
+pub mod kde;
 pub mod lock;
 pub mod wlroots;
 
@@ -26,7 +28,8 @@ pub enum BackendId {
     /// Sway >= 1.10: headless outputs over Sway IPC, sized through
     /// zwlr_output_manager_v1.
     Wlroots,
-    /// KDE Plasma (not implemented yet).
+    /// KDE Plasma (KWin): zkde_screencast virtual outputs over PipeWire,
+    /// fake-input pointer.
     Kde,
     /// xdg-desktop-portal ScreenCast/RemoteDesktop, e.g. GNOME (not implemented yet).
     Portal,

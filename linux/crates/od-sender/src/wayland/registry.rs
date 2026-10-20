@@ -69,6 +69,7 @@ pub const INTERESTING: &[&str] = &[
     "zwlr_output_manager_v1",
     "zxdg_output_manager_v1",
     "zkde_screencast_unstable_v1",
+    "org_kde_kwin_fake_input",
     "wp_presentation",
 ];
 
