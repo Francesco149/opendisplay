@@ -39,7 +39,7 @@ fn lookup(name: &str) -> Result<DisplayInfo> {
         width: o.width.max(0) as u32,
         height: o.height.max(0) as u32,
         refresh_hz: o.refresh_mhz as f64 / 1000.0,
-        scale: o.scale.max(1) as f64,
+        scale: o.fractional_scale(),
         x: o.x,
         y: o.y,
     })

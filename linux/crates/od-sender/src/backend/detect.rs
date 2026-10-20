@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::adopt::AdoptBackend;
 use super::hyprland::{HyprlandBackend, ipc};
+use super::wlroots::WlrootsBackend;
 use super::{Backend, BackendId};
 use crate::wayland::registry::Snapshot;
 
@@ -50,6 +51,7 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Hyprland { socket: PathBuf },
+    Wlroots { swaysock: PathBuf },
     Adopt { output: String },
     Unsupported(String),
 }
@@ -69,6 +71,21 @@ fn has_capture(s: &Snapshot) -> bool {
 
 fn has_input(s: &Snapshot) -> bool {
     s.has("zwlr_virtual_pointer_manager_v1")
+}
+
+/// What the wlroots backend needs beyond IPC: `capture.rs` speaks only
+/// ext-image-copy-capture (Sway >= 1.10), and sizing goes through the output
+/// manager.
+fn wlroots_missing(s: &Snapshot) -> Vec<&'static str> {
+    [
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwlr_output_manager_v1",
+    ]
+    .into_iter()
+    .filter(|g| !s.has(g))
+    .collect()
 }
 
 /// Walk §3.3 in order, stopping at the first hit. `probe` is the Wayland
@@ -162,7 +179,23 @@ pub fn decide(
             };
             return done(steps, d);
         }
-        (Some(b @ (BackendId::Wlroots | BackendId::Kde | BackendId::Portal)), _) => {
+        (Some(BackendId::Wlroots), _) => {
+            if req.output.is_some() {
+                steps.push("--output is ignored with --backend wlroots".into());
+            }
+            let d = match &env.swaysock {
+                Some(sock) => {
+                    steps.push(format!("SWAYSOCK={sock}"));
+                    sway(sock, &mut steps, &mut registry)
+                }
+                None => Decision::Unsupported(
+                    "--backend wlroots: SWAYSOCK is not set (only Sway can create outputs for now)"
+                        .into(),
+                ),
+            };
+            return done(steps, d);
+        }
+        (Some(b @ (BackendId::Kde | BackendId::Portal)), _) => {
             return done(
                 steps,
                 Decision::Unsupported(format!("the {b} backend is not implemented yet ({ISSUE})")),
@@ -192,12 +225,8 @@ pub fn decide(
     // 3. Sway.
     if let Some(sock) = &env.swaysock {
         steps.push(format!("SWAYSOCK={sock}"));
-        return done(
-            steps,
-            Decision::Unsupported(format!(
-                "Sway is not supported yet ({ISSUE}); use --output <name> with an output you created with `swaymsg create_output`"
-            )),
-        );
+        let d = sway(sock, &mut steps, &mut registry);
+        return done(steps, d);
     }
 
     // 4. A Wayland compositor that can capture and inject, but no IPC we know.
@@ -255,6 +284,35 @@ pub fn decide(
     )
 }
 
+/// Sway: its IPC socket must exist and the compositor must offer what the
+/// wlroots backend uses.
+fn sway(
+    sock: &str,
+    steps: &mut Vec<String>,
+    registry: &mut dyn FnMut(&mut Vec<String>) -> Result<Snapshot, String>,
+) -> Decision {
+    let path = PathBuf::from(sock);
+    if !path.exists() {
+        return Decision::Unsupported(format!(
+            "SWAYSOCK={sock} does not exist; run od-sender from a terminal inside Sway"
+        ));
+    }
+    match registry(steps) {
+        Ok(s) => {
+            let missing = wlroots_missing(&s);
+            if missing.is_empty() {
+                Decision::Wlroots { swaysock: path }
+            } else {
+                Decision::Unsupported(format!(
+                    "this Sway lacks {}; od-sender needs Sway >= 1.10",
+                    missing.join(", ")
+                ))
+            }
+        }
+        Err(e) => Decision::Unsupported(format!("Sway: no Wayland connection ({e})")),
+    }
+}
+
 fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
@@ -279,6 +337,7 @@ impl std::error::Error for Unsupported {}
 pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
     match decision {
         Decision::Hyprland { socket } => Ok(Box::new(HyprlandBackend::connect(socket)?)),
+        Decision::Wlroots { swaysock } => Ok(Box::new(WlrootsBackend::connect(swaysock)?)),
         Decision::Adopt { output } => Ok(Box::new(AdoptBackend::new(output))),
         Decision::Unsupported(msg) => Err(anyhow!(Unsupported(msg))),
     }
@@ -414,14 +473,60 @@ mod tests {
     }
 
     #[test]
-    fn sway_is_named() {
+    fn sway_selects_wlroots_when_it_has_the_protocols() {
+        let sock = std::env::temp_dir().join(format!("od-detect-sway-{}.sock", std::process::id()));
+        std::fs::write(&sock, b"").unwrap();
         let env = Environment {
-            swaysock: Some("/run/user/1000/sway-ipc.sock".into()),
+            swaysock: Some(sock.to_string_lossy().into()),
             wayland_display: Some("wayland-1".into()),
             ..Default::default()
         };
-        let (w, _) = run(&env, &Request::default(), Some(full_globals()));
-        assert!(unsupported(&w).starts_with("Sway is not supported yet"));
+        let mut globals = full_globals();
+        globals.globals.push(("zwlr_output_manager_v1".into(), 4));
+        let (w, probes) = run(&env, &Request::default(), Some(globals.clone()));
+        assert_eq!(
+            w.decision,
+            Decision::Wlroots {
+                swaysock: sock.clone()
+            }
+        );
+        assert_eq!(probes, 1);
+
+        // Sway 1.9: no ext-image-copy-capture, no output manager listed here.
+        let mut old = globals.clone();
+        old.globals
+            .retain(|(g, _)| !g.starts_with("ext_") && g != "zwlr_output_manager_v1");
+        let (w, _) = run(&env, &Request::default(), Some(old));
+        let msg = unsupported(&w);
+        assert!(msg.contains("ext_image_copy_capture_manager_v1"), "{msg}");
+        assert!(msg.contains("zwlr_output_manager_v1"), "{msg}");
+        assert!(msg.contains("Sway >= 1.10"), "{msg}");
+
+        // An explicit --output still means adopt, even on Sway.
+        let req = Request {
+            backend: None,
+            output: Some("HEADLESS-2".into()),
+        };
+        let (w, _) = run(&env, &req, Some(globals));
+        assert_eq!(
+            w.decision,
+            Decision::Adopt {
+                output: "HEADLESS-2".into()
+            }
+        );
+        std::fs::remove_file(&sock).unwrap();
+    }
+
+    #[test]
+    fn stale_swaysock_is_named() {
+        let env = Environment {
+            swaysock: Some("/nonexistent/sway-ipc.sock".into()),
+            wayland_display: Some("wayland-1".into()),
+            ..Default::default()
+        };
+        let (w, probes) = run(&env, &Request::default(), Some(full_globals()));
+        assert!(unsupported(&w).contains("does not exist"));
+        assert_eq!(probes, 0);
     }
 
     #[test]
@@ -485,6 +590,8 @@ mod tests {
         assert!(unsupported(&w).contains("--instance"));
         let (w, _) = run(&env, &force(BackendId::Adopt), None);
         assert!(unsupported(&w).contains("needs --output"));
+        let (w, _) = run(&env, &force(BackendId::Wlroots), None);
+        assert!(unsupported(&w).contains("SWAYSOCK is not set"));
         let (w, _) = run(&env, &force(BackendId::Kde), None);
         assert!(unsupported(&w).contains("not implemented yet"));
     }

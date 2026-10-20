@@ -6,6 +6,7 @@ pub mod adopt;
 pub mod detect;
 pub mod hyprland;
 pub mod lock;
+pub mod wlroots;
 
 use std::fmt;
 use std::str::FromStr;
@@ -22,7 +23,8 @@ pub enum BackendId {
     /// An output that already exists (`--output <name>`): capture and input
     /// only, nothing is created or removed.
     Adopt,
-    /// Sway and other wlroots compositors (not implemented yet).
+    /// Sway >= 1.10: headless outputs over Sway IPC, sized through
+    /// zwlr_output_manager_v1.
     Wlroots,
     /// KDE Plasma (not implemented yet).
     Kde,

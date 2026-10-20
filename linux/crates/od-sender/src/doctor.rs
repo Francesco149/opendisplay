@@ -10,6 +10,20 @@ use crate::config::{self, Config, Layer};
 use crate::encoder;
 use crate::wayland::registry::{self, INTERESTING};
 
+/// Outputs earlier senders made on Sway, from their records.
+fn wlroots_report() {
+    for (lock_name, rec) in crate::backend::wlroots::record::all() {
+        // Read-only: the pid the last holder wrote, not a lock attempt.
+        let state = match lock::holder_pid(&lock_name) {
+            Some(pid) if std::path::Path::new(&format!("/proc/{pid}")).exists() => {
+                format!("held by pid {pid}")
+            }
+            _ => "left behind; `od-sender clean` removes it".into(),
+        };
+        println!("  {lock_name} -> {} ({state})", rec.output);
+    }
+}
+
 /// Prints the report; returns `false` on an unsupported desktop.
 pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
     println!("od-sender {}", env!("CARGO_PKG_VERSION"));
@@ -31,6 +45,11 @@ pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
         Decision::Hyprland { socket } => {
             println!("  => hyprland ({})", socket.display());
             hyprland_report(socket.clone())
+        }
+        Decision::Wlroots { swaysock } => {
+            println!("  => wlroots ({})", swaysock.display());
+            wlroots_report();
+            true
         }
         Decision::Adopt { output } => {
             println!("  => adopt output {output}");
@@ -70,7 +89,7 @@ pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
                     o.width,
                     o.height,
                     o.refresh_mhz as f64 / 1000.0,
-                    o.scale,
+                    o.fractional_scale(),
                     o.x,
                     o.y
                 );
