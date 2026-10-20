@@ -70,10 +70,12 @@ compositors, Flatpak, HEVC.
 *Status 2026-10-20.* Done: the trait split (§3) with backends for Hyprland
 (IPC headless outputs), wlroots/Sway (IPC create/unplug,
 `zwlr_output_manager_v1` sizing), KDE (zkde_screencast virtual output, KWin
-fake input, PipeWire frames) and GNOME (Mutter's ScreenCast/RemoteDesktop
+fake input, PipeWire frames, scale/position through
+`kde_output_management_v2`) and GNOME (Mutter's ScreenCast/RemoteDesktop
 D-Bus APIs, PipeWire frames), plus adopt mode; capture through
 ext-image-copy-capture or wlr-screencopy (`--capture`, auto picks
-wlr-screencopy on Hyprland < 0.57, §8.13), zero-copy shm leases and banded
+wlr-screencopy on Hyprland < 0.57: 40/40 output removals under 4K capture
+survived on nested 0.56.2, ext crashed at the 7th, §8.13), zero-copy shm leases and banded
 BGRA→I420 ahead of x264; desktop policy from `hello.panel` with a 300 ms
 `hello` debounce; config file, `doctor`, `list`, `clean`, `--instance`;
 one-sender-per-receiver lock, redial backoff, recreation of a removed
@@ -82,8 +84,8 @@ channel (off on Hyprland, §8.14); release workflow with static FFmpeg
 tarballs; split Arch packages. Live: iPhone at ~19-21 ms capture-to-arrival
 p50; the iMac's 220 ms was the sender's 4K software encode plus an
 oldest-frame handoff bug, now e2e p50 55-67 ms (PLAN.md M3). CI: rust on
-x86_64/aarch64, the Arch package with a headless Sway smoke, kde-smoke and
-gnome-smoke (both experimental). Not yet: Android, a real (non-headless)
+x86_64/aarch64, the Arch package with a headless Sway smoke, kde-smoke
+(green, required) and gnome-smoke (experimental). Not yet: Android, a real (non-headless)
 Sway/KDE/GNOME session, x86_64 hardware, VA-API, a published release or AUR
 package, the website card.
 
@@ -427,7 +429,7 @@ uploads both logs. Jobs are gated on `paths` for their backend directory.
 | **Sway, headless** | `archlinux:latest` container on `ubuntu-24.04` (x86_64): `pacman -S sway pixman …`, `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c ci.conf &`, `swaymsg create_output`, `swaymsg output HEADLESS-2 mode --custom 640x480@60Hz`, then `dev smoke --output HEADLESS-2` (Adopt) and, once the backend exists, `--backend wlroots` | **verified** (sway 1.12, aarch64, 2026-10-20) with `linux/testbench/sway-smoke.sh`: `capture-test` + `input-test --output` pass; CI step in `linux.yml` `arch-package` (first run pending) | Ubuntu 24.04's sway 1.9 predates `ext-image-copy-capture` (sway >= 1.10), hence the Arch container, which also matches the AUR target and lets the same job run `makepkg` on the PKGBUILD (exit criterion 4). Exercises `wayland/capture.rs` + `wayland/input.rs` **at beta**, before any Sway backend |
 | **Hyprland, headless** | — | *not feasible* on GPU-less hosted runners (§4.1: allocator needs a DRM fd) | The Hyprland backend's IPC layer gets unit tests against recorded `hyprctl` JSON instead; live coverage is the nested harness here |
 | **Mutter (GNOME), headless** | `archlinux:latest` container: `mutter --headless --wayland --no-x11 --virtual-monitor 1280x800` under its own session bus, PipeWire and `wireplumber --profile policy`, **no system bus** (`DBUS_SYSTEM_BUS_ADDRESS` points nowhere), then `doctor`, `dev smoke --backend gnome` (1170x2532), scale 3→2 with `--position auto-left`, and `kill -9` cleanup; the run is under `strace` and fails on any system-bus connect | **verified locally** (Mutter 51.1, aarch64, `linux/testbench/gnome-smoke.sh`); CI job `gnome-smoke` experimental: first run failed before Mutter (no vgem on the runner kernel), render node now optional | Uses Mutter's private D-Bus APIs, not the portal: no chooser dialog, so it is automatable (`linux/research/gnome-backend.md`) |
-| **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | **verified locally** (KWin 6.8.0 headless on aarch64 with a GPU render node, `linux/testbench/kde-smoke.sh`); CI job `kde-smoke` in `linux.yml` relies on the `vgem` module for a render node on GPU-less runners (*plausible*, experimental, `continue-on-error`) | See the KDE findings below |
+| **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | **verified locally** (KWin 6.8.0 headless on aarch64 with a GPU render node, `linux/testbench/kde-smoke.sh`); CI job `kde-smoke` in `linux.yml` **green** and required since 2026-10-20, with the `vgem` module as render node on GPU-less runners (one runner kernel, 6.17.0-1022-azure, had no vgem: a run landing there fails) | See the KDE findings below |
 
 **Sway headless findings** (*verified* on sway 1.12 / wlroots 0.20, pixman
 renderer, headless backend, no GPU, isolated `XDG_RUNTIME_DIR`; they feed the
@@ -693,7 +695,7 @@ with this one machine.
 | **Cursor side channel** (`cursor`/`cursorImg`, UDP §6.3) | **Landed** (`wayland/cursor.rs`, `--cursor auto`/`video`/`off`): the video keeps its cursor until the first sprite arrives. **Off on Hyprland** (§8.14). On GNOME, Mutter's `cursor-mode` metadata would feed it; not wired yet | A compositor with working cursor sessions (Sway: unchecked) |
 | **Static FFmpeg (§3.5 C)** | **Landed** for the release tarballs (`packaging/ffmpeg/build-static.sh`); the AUR package still links the system FFmpeg | First tagged release; run the tarball in an Ubuntu container |
 | **Sway/wlroots backend** | **Landed** (`backend/wlroots`): create/unplug over Sway IPC, size/scale/position through `zwlr_output_manager_v1`, everything else `wayland/*` as-is. CI's headless Sway job runs `dev smoke --backend wlroots`, a full `run --backend wlroots` into `od-receiver --sink none` (~58 fps, e2e p50 ~17 ms at 1024x768 locally) and a `kill -9` + `clean` cycle. Left: a real (DRM) Sway session, other wlroots compositors (no output creation: adopt only) | Nested sway under Hyprland (§4.2) for a GPU-backed run |
-| **KDE backend** | **Landed** (`backend/kde`): `zkde_screencast_unstable_v1` virtual output (v4 `with_description`, v2 fallback), frames from its PipeWire node (`src/pipewire.rs`, shared with the portal backend), input through `org_kde_kwin_fake_input` (no portal, no dialog). Scale and `--position` set through `kde_output_management_v2` like on Hyprland/Sway. Left: a real Plasma session (DRM backend), KWin < 6.8 with the shipped .desktop entry, refresh rates above KWin's fixed 60 Hz (`set_custom_modes`) | Plasma VM or a KDE user; CI `kde-smoke` (§4.3) once vgem is proven |
+| **KDE backend** | **Landed** (`backend/kde`): `zkde_screencast_unstable_v1` virtual output (v4 `with_description`, v2 fallback), frames from its PipeWire node (`src/pipewire.rs`, shared with the portal backend), input through `org_kde_kwin_fake_input` (no portal, no dialog). Scale and `--position` set through `kde_output_management_v2` like on Hyprland/Sway. Left: a real Plasma session (DRM backend), KWin < 6.8 with the shipped .desktop entry, refresh rates above KWin's fixed 60 Hz (`set_custom_modes`) | Plasma VM or a KDE user; CI `kde-smoke` (§4.3, green) |
 | **GNOME backend** | **Landed** (`backend/gnome`) through Mutter's private ScreenCast/RemoteDesktop D-Bus APIs instead of the portal: no dialog, size via `RecordVirtual` `modes` (Mutter >= 50), scale and position via a temporary `DisplayConfig.ApplyMonitorsConfig` (§8.16), `--cursor off` → hidden. Left: a real GNOME session, Mutter < 50, cursor metadata | Headless Mutter here (`testbench/gnome-smoke.sh`); CI `gnome-smoke` |
 | **Portal backend (Flatpak)** | ScreenCast `VIRTUAL` + RemoteDesktop portals, `PwSource.remote_fd` (untested); the GNOME chooser needs one click per receiver, then a restore token | A GNOME or KDE VM; not automatable headless |
 | **VA-API (Intel/AMD, x86_64)** | `FrameBuf::Dmabuf` via `zwp_linux_dmabuf_v1` + gbm allocation, `Kind::Vaapi` with DRM hwframes (wl-screenrec is the reference); ahead of x264 in auto order; PLAN.md Spike 0 | Not testable here. Needs the Intel Omarchy machine or a volunteer; ship behind `--encoder vaapi` first |
@@ -755,10 +757,9 @@ What that means for `od-sender`, in priority order:
    the split*.
 3. **Output scale for phones.** `--scale passthrough` (default) gives the
    output the receiver's scale (3 on an iPhone); `--scale mac` uses the Mac
-   sender's 2x rule; a number is fixed. Per desktop: Hyprland and Sway apply
-   it as given; GNOME snaps to the scales Mutter offers for the mode (an
-   iPhone's 3 becomes 2); KDE ignores it and picks from DPI unless the user
-   saved one for that output. *Recommend `mac` as the default once
+   sender's 2x rule; a number is fixed. Per desktop: Hyprland, Sway and KDE
+   (`kde_output_management_v2`) apply it as given; GNOME snaps to the scales
+   Mutter offers for the mode (an iPhone's 3 becomes 2). *Recommend `mac` as the default once
    readability on the phone is checked.* Left open for the user.
 4. **Cursor baked into the video at beta.** Cursor moves at video latency
    and is absent on a static screen until damage. The side channel exists
@@ -816,7 +817,9 @@ What that means for `od-sender`, in priority order:
 13. **Hyprland < 0.57 crashes on ext-image-copy-capture when an output
     disappears under a frame request.** A race no client can close
     (`linux/research/hyprland-screenshare-transform.md`); its wlr-screencopy
-    path checks the monitor at every step. `--capture auto` therefore uses
+    path checks the monitor at every step: on nested 0.56.2, full-rate 4K
+    capture survived 40/40 output removals with wlr-screencopy, while ext
+    crashed Hyprland at the 7th. `--capture auto` therefore uses
     wlr-screencopy on Hyprland < 0.57 (or of unknown version); `ext` can be
     forced. Revisit when Omarchy ships 0.57.
 14. **Cursor side channel off on Hyprland.** Its cursor capture session
@@ -837,3 +840,10 @@ What that means for `od-sender`, in priority order:
     the layout when the virtual monitor goes (*verified* headless). Not yet
     tried on a real multi-monitor GNOME desktop; mirrored monitors untested.
     The call is skipped when Mutter's own placement already matches.
+17. **KDE `auto-left`/`auto-up` move the user's outputs.** KWin refuses
+    negative positions, so the new output goes to 0,0 and the other outputs
+    shift right/down in the same configuration, as KDE's display settings
+    do; the sender moves them back when it closes. After a `kill -9` they
+    stay shifted until the next placement re-normalises the layout.
+    *Recommend* `auto-right`/`auto-down` as the KDE default in docs, and a
+    `clean` step on KDE that re-normalises.
