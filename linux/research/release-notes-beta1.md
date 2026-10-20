@@ -40,8 +40,11 @@ experimental. Reports help a lot (see the end).
 
 * **Arch Linux / Omarchy:** `yay -S opendisplay-sender`
 * **Other distributions:** the `x86_64` and `aarch64` tarballs below; they
-  need glibc 2.38+ and PipeWire, not FFmpeg. Unpack and put `od-sender` on
-  your `PATH`.
+  need glibc 2.38+ and PipeWire (`libpipewire-0.3`), not FFmpeg. Unpack and
+  run `./install.sh`: it installs `od-sender` into `~/.local/bin` with a
+  desktop entry and a `systemd --user` unit pointing at it
+  (`sudo ./install.sh --system` for `/usr/local`; `--uninstall` removes
+  them).
 * **From source:** see [linux/README.md](https://github.com/peetzweg/opendisplay/blob/main/linux/README.md#from-source).
 
 Then open the OpenDisplay app on the receiver, on the same network, and run:
