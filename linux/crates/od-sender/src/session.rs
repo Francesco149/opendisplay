@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use opendisplay_proto::control::{Hello, StreamConfig};
+use opendisplay_proto::control::{CursorImg, Hello, StreamConfig};
 use opendisplay_session::Now;
 use opendisplay_session::sender::{SenderAction, SenderConfig, SenderEvent, SenderSession};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -20,13 +20,34 @@ use tracing::{debug, info, warn};
 
 use crate::backend::lock::{self, LockHeld};
 use crate::backend::{
-    Backend, CaptureEvent, CaptureOptions, DisplayInfo, DisplaySpec, Frame, FrameSink, InputSink,
-    Position, VirtualDisplay,
+    Backend, CaptureEvent, CaptureOptions, CursorEvent, DisplayInfo, DisplaySpec, Frame, FrameSink,
+    InputSink, Position, VirtualDisplay,
 };
 use crate::config::{self, Config, Layer};
 use crate::desktop::{self, Debounce, DesktopOptions, DesktopPlan, PlanError, StreamPlan};
 use crate::encoder::{Encoded, Encoder, EncoderSettings};
 use crate::latest;
+use crate::wayland::cursor::base64;
+
+/// How the pointer cursor reaches the receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CursorMode {
+    /// On the cursor side channel (`cursor`/`cursorImg`, PROTOCOL §6.3) when
+    /// the receiver offers a `cursorPort` and the compositor can deliver the
+    /// cursor separately; painted into the video otherwise.
+    #[default]
+    Auto,
+    /// Always painted into the video.
+    Video,
+    /// Not shown.
+    Off,
+}
+
+/// Whether to ask the display for the cursor on its own: `Auto`, a backend
+/// that can, and a receiver that renders a cursor (it offers `cursorPort`).
+fn cursor_separately(mode: CursorMode, backend_can: bool, receiver_offers: bool) -> bool {
+    mode == CursorMode::Auto && backend_can && receiver_offers
+}
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -35,8 +56,8 @@ pub struct RunOptions {
     pub desktop: DesktopOptions,
     pub threads: u16,
     pub encoder: crate::encoder::Backend,
-    /// Bake the cursor into the video (receivers without cursor rendering).
-    pub cursor_in_video: bool,
+    /// How the cursor reaches the receiver.
+    pub cursor: CursorMode,
     /// Where the virtual output goes.
     pub position: Position,
     /// Leave the virtual output in place when the session ends.
@@ -361,6 +382,7 @@ fn build(
     active: &mut Option<Active>,
     target: Target,
     opts: &RunOptions,
+    cursor: Option<&mpsc::UnboundedSender<CursorEvent>>,
 ) -> Result<StreamPlan> {
     let mut display = match active.take() {
         Some(Active {
@@ -390,12 +412,19 @@ fn build(
         max_fps: target.plan.stream.fps as f32,
         threads: opts.threads,
     })?;
-    display.start_capture(
-        CaptureOptions {
-            cursor: opts.cursor_in_video,
-        },
-        pipe.sink(),
-    )?;
+    let mut painted = opts.cursor != CursorMode::Off;
+    if let Some(tx) = cursor {
+        let tx = tx.clone();
+        match display.start_cursor(Box::new(move |ev| {
+            let _ = tx.send(ev);
+        })) {
+            Ok(()) => painted = false,
+            Err(e) => {
+                warn!("cursor side channel unavailable ({e:#}); painting the cursor into the video")
+            }
+        }
+    }
+    display.start_capture(CaptureOptions { cursor: painted }, pipe.sink())?;
     let input = match display.input() {
         Ok(i) => Some(i),
         Err(e) => {
@@ -582,8 +611,16 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
                 let _ = stream.set_nodelay(true);
                 info!("connected to receiver {addr}");
                 let began = Instant::now();
-                let end =
-                    session(stream, backend, &opts, start, shutdown.clone(), &mut losses).await;
+                let end = session(
+                    stream,
+                    backend,
+                    &opts,
+                    start,
+                    shutdown.clone(),
+                    &mut losses,
+                    Some(addr),
+                )
+                .await;
                 lasted = Some(began.elapsed());
                 match end {
                     Ok(SessionEnd::LockConflict { held, receiver }) => {
@@ -669,9 +706,10 @@ async fn apply<S: AsyncWrite + Unpin>(
     active: &mut Option<Active>,
     target: Target,
     opts: &RunOptions,
+    cursor: Option<&mpsc::UnboundedSender<CursorEvent>>,
 ) -> Result<()> {
     info!("plan: {}", target.plan);
-    let plan = build(backend, active, target, opts)?;
+    let plan = build(backend, active, target, opts, cursor)?;
     send_stream_config(stream, sess, &plan).await
 }
 
@@ -682,8 +720,18 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     start: Instant,
     mut shutdown: watch::Receiver<bool>,
     losses: &mut LossBudget,
+    peer: Option<SocketAddr>,
 ) -> Result<SessionEnd> {
     let mut sess = SenderSession::new(SenderConfig::default());
+    // Cursor events from the display's cursor thread, and the UDP socket for
+    // the side channel (bound on the first datagram).
+    let (cursor_tx, mut cursor_rx) = mpsc::unbounded_channel::<CursorEvent>();
+    let mut udp: Option<tokio::net::UdpSocket> = None;
+    let cursor_for = |opts: &RunOptions, backend: &dyn Backend, sess: &SenderSession| {
+        let offers = sess.hello().is_some_and(|h| h.cursor_port.is_some());
+        cursor_separately(opts.cursor, backend.caps().cursor_metadata, offers)
+            .then(|| cursor_tx.clone())
+    };
     sess.handle(now(start), SenderEvent::Connected);
     let mut active: Option<Active> = None;
     // `opts` with this receiver's config table applied, once its hello names it.
@@ -726,7 +774,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             warn!("{name} lost too often; closing the connection");
                             return Ok(SessionEnd::DisplayLost);
                         }
-                        match build(backend, &mut active, target, &ropts) {
+                        let cur = cursor_for(&ropts, backend, &sess);
+                        match build(backend, &mut active, target, &ropts, cur.as_ref()) {
                             Ok(plan) => {
                                 info!("recreated virtual display {name}");
                                 send_stream_config(&mut stream, &sess, &plan).await?;
@@ -739,9 +788,17 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         vec![]
                     }
                 },
+                Some(ev) = cursor_rx.recv() => match ev {
+                    CursorEvent::Moved { x, y } => sess.cursor(now(start), x, y, true),
+                    CursorEvent::Hidden => sess.cursor(now(start), 0.0, 0.0, false),
+                    CursorEvent::Image { png, nw, nh, ax, ay } => {
+                        vec![sess.cursor_image(CursorImg { nw, nh, ax, ay, png: base64(&png) })]
+                    }
+                },
                 _ = sleep_until_opt(debounce.deadline()) => {
                     if let Some(t) = debounce.poll(Instant::now()) {
-                        if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts).await {
+                        let cur = cursor_for(&ropts, backend, &sess);
+                        if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
                             return conflict_or(e, sess.hello().map_or_else(|| "this receiver".into(), receiver_label));
                         }
                     }
@@ -767,7 +824,18 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
             for a in actions {
                 match a {
                     SenderAction::Send(bytes) => stream.write_all(&bytes).await.context("write")?,
-                    SenderAction::SendCursorDatagram(_) => {}
+                    SenderAction::SendCursorDatagram(d) => {
+                        if let (Some(peer), Some(port)) = (peer, sess.cursor_udp_port()) {
+                            if udp.is_none() {
+                                let any: SocketAddr = if peer.is_ipv4() { ([0, 0, 0, 0], 0).into() } else { ([0u16; 8], 0).into() };
+                                udp = tokio::net::UdpSocket::bind(any).await.map_err(|e| warn!("cursor UDP socket: {e}")).ok();
+                            }
+                            if let Some(u) = &udp {
+                                // Latest wins: a full socket buffer drops this one.
+                                let _ = u.try_send_to(&d, SocketAddr::new(peer.ip(), port));
+                            }
+                        }
+                    }
                     SenderAction::Hello(h) => {
                         info!(
                             "hello: {}x{} @{} scale {} device {:?} id {:?} pv {}",
@@ -792,7 +860,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         }
                         // The first plan applies at once; re-sent hellos settle first (§6.1).
                         if let Some(t) = debounce.on_hello(t, Instant::now()) {
-                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts).await {
+                            let cur = cursor_for(&ropts, backend, &sess);
+                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
                                 return conflict_or(e, receiver_label(&h));
                             }
                         }
@@ -860,7 +929,7 @@ mod tests {
             desktop: DesktopOptions::default(),
             threads: 1,
             encoder: crate::encoder::Backend::Auto,
-            cursor_in_video: true,
+            cursor: CursorMode::Auto,
             position: Position::AutoRight,
             keep_output: false,
             reconnect: false,
@@ -933,6 +1002,8 @@ mod tests {
         sink: Arc<Mutex<Option<FrameSink>>>,
         fail_reconfigure: Arc<AtomicBool>,
         panic_on_input: Arc<AtomicBool>,
+        cursor_sink: Arc<Mutex<Option<crate::backend::CursorSink>>>,
+        painted: Arc<Mutex<Option<bool>>>,
     }
 
     impl Shared {
@@ -983,7 +1054,7 @@ mod tests {
         }
         fn caps(&self) -> Caps {
             Caps {
-                cursor_metadata: false,
+                cursor_metadata: true,
                 dmabuf: false,
                 resize_in_place: true,
                 creates_outputs: true,
@@ -1002,7 +1073,13 @@ mod tests {
         fn info(&self) -> &DisplayInfo {
             &self.1
         }
-        fn start_capture(&mut self, _: CaptureOptions, sink: FrameSink) -> Result<()> {
+        fn start_cursor(&mut self, sink: crate::backend::CursorSink) -> Result<()> {
+            self.0.log("start_cursor");
+            *self.0.cursor_sink.lock().unwrap() = Some(sink);
+            Ok(())
+        }
+        fn start_capture(&mut self, o: CaptureOptions, sink: FrameSink) -> Result<()> {
+            *self.0.painted.lock().unwrap() = Some(o.cursor);
             self.0.log("start_capture");
             *self.0.sink.lock().unwrap() = Some(sink);
             Ok(())
@@ -1087,6 +1164,7 @@ mod tests {
                 Instant::now(),
                 shutdown_rx,
                 &mut budget,
+                None,
             )
             .await
         });
@@ -1284,6 +1362,106 @@ mod tests {
         // Another receiver gets the options as they were.
         let other = base.for_receiver(&[Some("someone-else"), None, None]);
         assert_eq!(other.position, base.position);
+    }
+
+    #[test]
+    fn the_cursor_goes_separately_only_when_everyone_can() {
+        assert!(cursor_separately(CursorMode::Auto, true, true));
+        assert!(!cursor_separately(CursorMode::Auto, false, true));
+        assert!(!cursor_separately(CursorMode::Auto, true, false));
+        assert!(!cursor_separately(CursorMode::Video, true, true));
+        assert!(!cursor_separately(CursorMode::Off, true, true));
+    }
+
+    /// A receiver offering `cursorPort` gets the cursor as `cursor` and
+    /// `cursorImg` messages (mirrored on TCP until a `cursorAck`), and the
+    /// video without a painted cursor.
+    #[tokio::test]
+    async fn the_cursor_rides_the_side_channel_when_offered() {
+        let (mut hello, name) = test_hello("cu");
+        hello.cursor_port = Some(9001);
+        let shared = Shared::default();
+        let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut backend = FakeBackend(shared.clone());
+        let task = tokio::spawn(async move {
+            let mut budget = LossBudget::default();
+            session(
+                sender_io,
+                &mut backend,
+                &opts(),
+                Instant::now(),
+                shutdown_rx,
+                &mut budget,
+                None,
+            )
+            .await
+        });
+        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello));
+        let rx_now = || Now::new(Duration::from_secs(1), 1e6);
+        for a in rx.handle(rx_now(), ReceiverEvent::Connected) {
+            if let ReceiverAction::Send(b) = a {
+                receiver_io.write_all(&b).await.unwrap();
+            }
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        let (mut moved, mut sprite, mut pushed) = (None, None, false);
+        while moved.is_none() || sprite.is_none() {
+            let n = tokio::time::timeout(Duration::from_secs(5), receiver_io.read(&mut buf))
+                .await
+                .expect("sender went quiet")
+                .unwrap();
+            assert!(n > 0, "sender hung up");
+            for a in rx.handle(rx_now(), ReceiverEvent::Bytes(&buf[..n])) {
+                match a {
+                    ReceiverAction::StreamConfig(_) if !pushed => {
+                        pushed = true;
+                        let mut sink = shared
+                            .cursor_sink
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .expect("cursor started");
+                        sink(CursorEvent::Image {
+                            png: b"PNG".to_vec(),
+                            nw: 0.02,
+                            nh: 0.04,
+                            ax: 0.25,
+                            ay: 0.5,
+                        });
+                        sink(CursorEvent::Moved { x: 0.5, y: 0.25 });
+                        *shared.cursor_sink.lock().unwrap() = Some(sink);
+                    }
+                    ReceiverAction::Cursor { x, y, visible } => moved = Some((x, y, visible)),
+                    ReceiverAction::CursorImage(img) => sprite = Some(img),
+                    _ => {}
+                }
+            }
+        }
+        drop(receiver_io);
+        task.await.unwrap().unwrap();
+        forget_lock(&name);
+        assert_eq!(
+            *shared.painted.lock().unwrap(),
+            Some(false),
+            "no cursor in the video"
+        );
+        assert_eq!(moved, Some((Some(0.5), Some(0.25), true)));
+        let img = sprite.unwrap();
+        assert_eq!((img.nw, img.nh, img.ax, img.ay), (0.02, 0.04, 0.25, 0.5));
+        assert_eq!(img.png, base64(b"PNG"));
+        let log = shared.entries();
+        assert_eq!(&log[1..3], ["start_cursor", "start_capture"]);
+    }
+
+    #[tokio::test]
+    async fn without_a_cursor_port_the_cursor_is_painted() {
+        let (hello, name) = test_hello("cv");
+        let shared = Shared::default();
+        let _ = drive_with(shared.clone(), hello, 0).await;
+        forget_lock(&name);
+        assert_eq!(*shared.painted.lock().unwrap(), Some(true));
+        assert!(!shared.entries().iter().any(|l| l == "start_cursor"));
     }
 
     #[test]

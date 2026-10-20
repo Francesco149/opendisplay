@@ -77,6 +77,20 @@ pub enum Dev {
         #[arg(long)]
         save: Option<std::path::PathBuf>,
     },
+    /// Follow the pointer cursor of an existing output through the
+    /// ext-image-copy-capture cursor session (the cursor side channel's
+    /// source) and log what would be sent: position, enter/leave, sprite.
+    /// Creates nothing.
+    CursorTest {
+        /// wl_output name, e.g. eDP-1 or an od-… output.
+        #[arg(long)]
+        output: String,
+        #[arg(long, default_value_t = 10.0)]
+        seconds: f64,
+        /// Write the last sprite PNG here.
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+    },
     /// Through the detected backend: open (or adopt) a display, capture and
     /// encode `--frames` frames while moving the pointer over it, scroll
     /// once, tear down. Exits non-zero on any failed step (SENDER-PLAN §4.3).
@@ -179,6 +193,11 @@ pub fn run(cmd: Dev) -> Result<()> {
             cursor,
             save,
         } => capture_test(output, seconds, cursor, save),
+        Dev::CursorTest {
+            output,
+            seconds,
+            save,
+        } => cursor_test(&output, Duration::from_secs_f64(seconds), save),
         Dev::Smoke {
             size,
             frames,
@@ -315,6 +334,66 @@ fn capture_test(
             }
         }
         std::fs::write(&path, ppm)?;
+        info!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>) -> Result<()> {
+    use crate::backend::CursorEvent;
+    let snap = crate::wayland::registry::snapshot()?;
+    let o = snap
+        .output(output)
+        .with_context(|| format!("no output {output}"))?;
+    let (w, h) = (o.width.max(1) as u32, o.height.max(1) as u32);
+    info!("following the cursor on {output} ({w}x{h}) for {seconds:?}; move the pointer over it");
+    let (tx, rx) = std::sync::mpsc::channel::<CursorEvent>();
+    let mut thread = crate::wayland::cursor::CursorThread::spawn(
+        output,
+        w,
+        h,
+        Box::new(move |ev| {
+            let _ = tx.send(ev);
+        }),
+    )?;
+    let start = Instant::now();
+    let (mut moves, mut sprites) = (0u32, 0u32);
+    let mut last_png = None;
+    let mut last_log = Instant::now() - Duration::from_secs(1);
+    while start.elapsed() < seconds {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(CursorEvent::Moved { x, y }) => {
+                moves += 1;
+                if last_log.elapsed() >= Duration::from_millis(250) {
+                    info!("cursor at {x:.4},{y:.4} ({moves} updates)");
+                    last_log = Instant::now();
+                }
+            }
+            Ok(CursorEvent::Hidden) => info!("cursor hidden (left {output})"),
+            Ok(CursorEvent::Image {
+                png,
+                nw,
+                nh,
+                ax,
+                ay,
+            }) => {
+                sprites += 1;
+                info!(
+                    "sprite: {} bytes PNG, {:.4}x{:.4} of the display, hotspot {ax:.3},{ay:.3}",
+                    png.len(),
+                    nw,
+                    nh
+                );
+                last_png = Some(png);
+            }
+            Err(_) => {}
+        }
+    }
+    thread.stop();
+    let rate = moves as f64 / seconds.as_secs_f64();
+    info!("{moves} position updates ({rate:.0}/s), {sprites} sprites");
+    if let (Some(path), Some(png)) = (save, last_png) {
+        std::fs::write(&path, png)?;
         info!("wrote {}", path.display());
     }
     Ok(())

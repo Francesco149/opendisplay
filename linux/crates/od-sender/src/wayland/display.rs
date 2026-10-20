@@ -8,10 +8,11 @@ use anyhow::Result;
 use tracing::warn;
 
 use super::capture::CaptureThread;
+use super::cursor::CursorThread;
 use super::input::InputInjector;
 use crate::backend::lock::OutputLock;
 use crate::backend::{
-    CaptureOptions, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
+    CaptureOptions, CursorSink, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
 };
 
 /// The compositor-specific half of a display. Neither method is called while
@@ -25,6 +26,8 @@ pub trait OutputControl: Send + 'static {
 
 pub struct CapturedDisplay<O: OutputControl> {
     capture: Option<CaptureThread>,
+    /// The cursor side channel's session; a capture of the output too.
+    cursor: Option<CursorThread>,
     output: O,
     /// Held for the display's lifetime; see [`crate::backend::lock`].
     _lock: OutputLock,
@@ -36,6 +39,7 @@ impl<O: OutputControl> CapturedDisplay<O> {
     pub fn new(output: O, lock: OutputLock) -> Self {
         Self {
             capture: None,
+            cursor: None,
             output,
             _lock: lock,
             released: false,
@@ -66,8 +70,25 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
         Ok(())
     }
 
+    fn start_cursor(&mut self, sink: CursorSink) -> Result<()> {
+        if let Some(mut c) = self.cursor.take() {
+            c.stop();
+        }
+        let info = self.output.info();
+        self.cursor = Some(CursorThread::spawn(
+            &info.name,
+            info.width,
+            info.height,
+            sink,
+        )?);
+        Ok(())
+    }
+
     fn stop_capture(&mut self) {
         if let Some(mut c) = self.capture.take() {
+            c.stop();
+        }
+        if let Some(mut c) = self.cursor.take() {
             c.stop();
         }
     }

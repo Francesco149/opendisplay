@@ -89,8 +89,13 @@ enum Cmd {
         /// Encoder threads (0 = all cores).
         #[arg(long, default_value_t = 0)]
         threads: u16,
-        /// Do not bake the cursor into the video.
-        #[arg(long)]
+        /// Cursor delivery: `auto` (side channel when the receiver and
+        /// compositor support it, else painted into the video), `video`, or
+        /// `off` [default: auto, or the config file's].
+        #[arg(long, value_enum)]
+        cursor: Option<session::CursorMode>,
+        /// Same as `--cursor off`.
+        #[arg(long, conflicts_with = "cursor")]
         no_cursor: bool,
         /// Position of the virtual output: auto-right, auto-left, auto-up,
         /// auto-down, or "x,y" [default: auto-right, or the config file's].
@@ -220,6 +225,7 @@ fn real_main() -> Result<i32> {
             scale,
             threads,
             encoder,
+            cursor,
             no_cursor,
             position,
             keep_output,
@@ -254,7 +260,11 @@ fn real_main() -> Result<i32> {
                         },
                         threads: dev::threads_or_all(threads),
                         encoder: encoder.or(config.encoder).unwrap_or(encoder::Backend::Auto),
-                        cursor_in_video: !no_cursor && config.cursor.unwrap_or(true),
+                        cursor: if no_cursor {
+                            session::CursorMode::Off
+                        } else {
+                            cursor.or(config.cursor).unwrap_or_default()
+                        },
                         position: eff.position.unwrap_or(Position::AutoRight),
                         keep_output,
                         reconnect: !no_reconnect,
