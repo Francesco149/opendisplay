@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use super::capture::CapturePath;
 use super::lock::lock_output;
 use super::{Backend, BackendId, Caps, DisplayInfo, DisplaySpec, VirtualDisplay};
 use crate::wayland::display::{CapturedDisplay, OutputControl};
@@ -14,11 +15,15 @@ use crate::wayland::registry;
 
 pub struct AdoptBackend {
     output: String,
+    capture: CapturePath,
 }
 
 impl AdoptBackend {
     pub fn new(output: String) -> Self {
-        Self { output }
+        Self {
+            output,
+            capture: CapturePath::Ext,
+        }
     }
 }
 
@@ -86,6 +91,10 @@ impl Backend for AdoptBackend {
         }
     }
 
+    fn set_capture(&mut self, path: CapturePath) {
+        self.capture = path;
+    }
+
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
         let lock = lock_output(&self.output)?;
         let mut out = AdoptedOutput {
@@ -96,7 +105,7 @@ impl Backend for AdoptBackend {
             warn!("output {} reports no current mode", self.output);
         }
         info!("adopted display {}", out.info);
-        Ok(Box::new(CapturedDisplay::new(out, lock)))
+        Ok(Box::new(CapturedDisplay::new(out, lock, self.capture)))
     }
 
     fn clean(&mut self) -> Result<Vec<String>> {

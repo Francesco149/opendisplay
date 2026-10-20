@@ -1176,6 +1176,7 @@ name = "od-sender"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags",
  "clap",
  "ffmpeg-next",
  "mdns-sd",

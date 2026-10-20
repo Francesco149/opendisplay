@@ -1,10 +1,11 @@
 //! KDE Plasma (KWin): a virtual output requested through
 //! `zkde_screencast_unstable_v1`, its frames from the PipeWire node KWin
-//! creates for it, input through `org_kde_kwin_fake_input`. No dialog and
-//! no portal. KWin removes the output when the stream closes or the process
+//! creates for it, input through `org_kde_kwin_fake_input`, scale and place
+//! through `kde_output_management_v2` ([`outputs`]). No dialog and no portal. KWin removes the output when the stream closes or the process
 //! dies, so nothing is ever left behind and `--keep-output` cannot work.
 
 pub mod input;
+pub mod outputs;
 pub mod protocols;
 pub mod screencast;
 
@@ -31,6 +32,13 @@ pub fn output_name(lock_name: &str) -> String {
 pub struct KdeBackend;
 
 impl Backend for KdeBackend {
+    /// Frames come over PipeWire, not a Wayland capture protocol.
+    fn wayland_capture(&self) -> bool {
+        false
+    }
+
+    fn set_capture(&mut self, _: super::capture::CapturePath) {}
+
     fn id(&self) -> BackendId {
         BackendId::Kde
     }
@@ -55,6 +63,7 @@ impl Backend for KdeBackend {
             capture: None,
             stream: None,
             pointer: Pointer::Embedded,
+            shifted_others: false,
             spec: spec.clone(),
             info: DisplayInfo {
                 name: output_name(&spec.name),
@@ -82,6 +91,8 @@ pub struct KdeDisplay {
     capture: Option<PwCapture>,
     stream: Option<VirtualOutputStream>,
     pointer: Pointer,
+    /// A left/up placement moved the other outputs; move them back on close.
+    shifted_others: bool,
     spec: DisplaySpec,
     info: DisplayInfo,
     _lock: OutputLock,
@@ -133,6 +144,33 @@ impl KdeDisplay {
         }
     }
 
+    /// The output as wl_output/xdg-output report it once a configuration
+    /// reached them (they follow kde_output_management asynchronously).
+    fn settled(&self, name: &str, scale: f64, pos: (i32, i32)) -> Option<OutputSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Some(o) = registry::snapshot().ok()?.output(name).cloned() {
+                if (o.fractional_scale() - scale).abs() < 0.01 && (o.x, o.y) == pos {
+                    return Some(o);
+                }
+                last = Some(o);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if let Some(o) = &last {
+            warn!(
+                "{name} reports scale {} at {},{} after asking {scale} at {},{}",
+                o.fractional_scale(),
+                o.x,
+                o.y,
+                pos.0,
+                pos.1
+            );
+        }
+        last
+    }
+
     /// (Re)create the output for `self.spec` and read its layout back.
     fn create(&mut self) -> Result<()> {
         let want = (self.spec.width, self.spec.height);
@@ -155,15 +193,22 @@ impl KdeDisplay {
                 o.name, o.width, o.height, want.0, want.1
             );
         }
-        let scale = o.fractional_scale();
-        if (scale - self.spec.scale).abs() > 0.01 {
-            // KWin picks the scale of a new output from its DPI or from what
-            // the user saved for this output name in System Settings.
-            info!(
-                "KWin set {} to scale {scale} (asked {}); change it once in System Settings > Display, KWin remembers it per output",
-                o.name, self.spec.scale
-            );
+        // KWin picks a new output's scale from its DPI (or the user's saved
+        // choice for this name) and places it itself; set both as asked.
+        match outputs::configure(&o.name, self.spec.scale, self.spec.position) {
+            Ok(p) => {
+                self.shifted_others |= p.shifted_others;
+                o = self
+                    .settled(&o.name, self.spec.scale, (p.x, p.y))
+                    .unwrap_or(o);
+            }
+            Err(e) => warn!(
+                "{}: keeping KWin's scale {} and position: {e:#}",
+                o.name,
+                o.fractional_scale()
+            ),
         }
+        let scale = o.fractional_scale();
         self.info = DisplayInfo {
             name: o.name.clone(),
             width: o.width as u32,
@@ -231,17 +276,28 @@ impl VirtualDisplay for KdeDisplay {
                 self.info.name
             );
         }
-        self.stop_capture();
-        self.stream = None;
+        self.release();
         info!("removed virtual display {}", self.info.name);
         Ok(())
     }
 }
 
+impl KdeDisplay {
+    /// Capture first, then the output; then put the user's outputs back.
+    fn release(&mut self) {
+        self.stop_capture();
+        if self.stream.take().is_some() && self.shifted_others {
+            self.shifted_others = false;
+            if let Err(e) = outputs::restore_origin(&self.info.name) {
+                warn!("{e:#}");
+            }
+        }
+    }
+}
+
 impl Drop for KdeDisplay {
     fn drop(&mut self) {
-        self.stop_capture();
-        self.stream = None;
+        self.release();
     }
 }
 

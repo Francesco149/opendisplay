@@ -490,6 +490,16 @@ future wlroots backend):
   DPI (`OutputConfigurationStore::chooseScale`), unless the user saved one
   for that output name; `kscreen-doctor output.Virtual-od-<id>.scale.2` once
   made the next stream for that receiver come up at scale 2 (*verified*).
+  The backend therefore sets scale and position itself through
+  `kde_output_management_v2` (devices from `kde_output_device_registry_v2`
+  on KWin >= 6.5, per-device globals before), right after creating the output.
+* Position: KWin refuses negative coordinates ("Position of enabled output
+  … is negative"), so `auto-left`/`auto-up` put the new output at 0,0 and
+  shift the other outputs right/down in the same configuration, as KDE's
+  display settings do; on close the remaining outputs move back so the
+  layout starts at 0,0 again (KWin itself leaves them shifted). All five
+  `--position` forms *verified*; a `kill -9` cannot restore, the next
+  placement re-normalises.
 * PipeWire: the consumer must offer the output size as the preferred
   `VideoSize`, or KWin resamples (it negotiated 1920x1080 for 800x600).
   memfd/shm buffers when no modifiers are offered; BGRx.
@@ -671,7 +681,7 @@ with this one machine.
 | **Cursor side channel** (`cursor`/`cursorImg`, UDP §6.3) | `wayland/cursor.rs` on the ext cursor session (Hyprland implements `ext_image_copy_capture_cursor_session_v1`, §2); `SenderSession` already does the UDP/ack dance | iPhone and Mac receiver here; the receiver's overlay shows cursor rate |
 | **Static FFmpeg (§3.5 C)** | `ffmpeg-sys-next` build features in CI, cache, licence note | CI; run the tarball here and in an Ubuntu container |
 | **Sway/wlroots backend** | **Landed** (`backend/wlroots`): create/unplug over Sway IPC, size/scale/position through `zwlr_output_manager_v1`, everything else `wayland/*` as-is. CI's headless Sway job runs `dev smoke --backend wlroots`, a full `run --backend wlroots` into `od-receiver --sink none` (~58 fps, e2e p50 ~17 ms at 1024x768 locally) and a `kill -9` + `clean` cycle. Left: a real (DRM) Sway session, other wlroots compositors (no output creation: adopt only) | Nested sway under Hyprland (§4.2) for a GPU-backed run |
-| **KDE backend** | **Landed** (`backend/kde`): `zkde_screencast_unstable_v1` virtual output (v4 `with_description`, v2 fallback), frames from its PipeWire node (`src/pipewire.rs`, shared with the portal backend), input through `org_kde_kwin_fake_input` (no portal, no dialog). Left: setting scale/position through `kde_output_management_v2` (KWin picks the scale from DPI today, users set it once per receiver in System Settings), a real Plasma session (DRM backend), KWin < 6.8 with the shipped .desktop entry | Plasma VM or a KDE user; CI `kde-smoke` (§4.3) once vgem is proven |
+| **KDE backend** | **Landed** (`backend/kde`): `zkde_screencast_unstable_v1` virtual output (v4 `with_description`, v2 fallback), frames from its PipeWire node (`src/pipewire.rs`, shared with the portal backend), input through `org_kde_kwin_fake_input` (no portal, no dialog). Scale and `--position` set through `kde_output_management_v2` like on Hyprland/Sway. Left: a real Plasma session (DRM backend), KWin < 6.8 with the shipped .desktop entry, refresh rates above KWin's fixed 60 Hz (`set_custom_modes`) | Plasma VM or a KDE user; CI `kde-smoke` (§4.3) once vgem is proven |
 | **Portal backend (GNOME)** | `ashpd` ScreenCast `VIRTUAL` + `METADATA` cursor, `pipewire.rs`, RemoteDesktop input, restore tokens. Whether GNOME lets the app choose the virtual monitor's size is *unverified* (KDE does not, §3.2) | GNOME in an aarch64 VM; CI mutter headless job (§4.3) once the dialog question is solved |
 | **VA-API (Intel/AMD, x86_64)** | `FrameBuf::Dmabuf` via `zwp_linux_dmabuf_v1` + gbm allocation, `Kind::Vaapi` with DRM hwframes (wl-screenrec is the reference); ahead of x264 in auto order; PLAN.md Spike 0 | Not testable here. Needs the Intel Omarchy machine or a volunteer; ship behind `--encoder vaapi` first |
 | **x86_64 confirmation** | nothing new | A volunteer on Omarchy x86_64 running the §1.2 list; CI already builds it and the Arch-container job runs the smoke on x86_64 |

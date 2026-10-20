@@ -78,6 +78,9 @@ pub enum Dev {
         /// Write the last frame as a PPM here.
         #[arg(long)]
         save: Option<std::path::PathBuf>,
+        /// Capture protocol (wlr needs --output).
+        #[arg(long, value_enum, default_value_t = crate::backend::capture::CaptureChoice::Ext)]
+        capture: crate::backend::capture::CaptureChoice,
     },
     /// Follow the pointer cursor of an existing output through the
     /// ext-image-copy-capture cursor session (the cursor side channel's
@@ -240,7 +243,8 @@ pub fn run(cmd: Dev) -> Result<()> {
             seconds,
             cursor,
             save,
-        } => capture_test(output, seconds, cursor, save),
+            capture,
+        } => capture_test(output, seconds, cursor, save, capture),
         Dev::CursorTest {
             output,
             seconds,
@@ -550,19 +554,24 @@ fn capture_test(
     seconds: f64,
     cursor: bool,
     save: Option<std::path::PathBuf>,
+    protocol: crate::backend::capture::CaptureChoice,
 ) -> Result<()> {
+    use crate::backend::capture::CaptureChoice;
     let mut last: Option<(capture::FrameInfo, crate::wayland::shm_pool::Lease)> = None;
-    let n = capture::capture_shm(
-        output.as_deref(),
-        cursor,
-        Duration::from_secs_f64(seconds),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        |info: &capture::FrameInfo, lease| {
-            if save.is_some() {
-                last = Some((*info, lease));
-            }
-        },
-    )?;
+    let keep = |info: &capture::FrameInfo, lease| {
+        if save.is_some() {
+            last = Some((*info, lease));
+        }
+    };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let duration = Duration::from_secs_f64(seconds);
+    let n = match protocol {
+        CaptureChoice::Wlr => {
+            let name = output.as_deref().context("--capture wlr needs --output")?;
+            crate::wayland::screencopy::capture_wlr(name, cursor, duration, stop, keep)?
+        }
+        _ => capture::capture_shm(output.as_deref(), cursor, duration, stop, keep)?,
+    };
     info!("{n} frames captured");
     if let (Some(path), Some((info, pixels))) = (save, last) {
         let mut ppm = format!("P6\n{} {}\n255\n", info.width, info.height).into_bytes();

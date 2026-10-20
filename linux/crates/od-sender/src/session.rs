@@ -1164,6 +1164,7 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
+        fn set_capture(&mut self, _: crate::backend::capture::CapturePath) {}
         fn id(&self) -> BackendId {
             BackendId::Adopt
         }

@@ -47,14 +47,25 @@ pub struct BackendArgs {
     /// Use this existing output instead of creating one (adopt mode).
     #[arg(long, value_name = "NAME")]
     pub output: Option<String>,
+    /// Capture protocol: auto (wlr-screencopy on Hyprland < 0.57, else
+    /// ext-image-copy-capture), ext or wlr [default: auto, or the config
+    /// file's `capture`].
+    #[arg(long, value_enum)]
+    pub capture: Option<backend::capture::CaptureChoice>,
 }
 
 impl BackendArgs {
-    pub fn request(&self) -> Request {
+    /// The request, with the config file's `capture` under the flag.
+    pub fn request_with(&self, config: Option<backend::capture::CaptureChoice>) -> Request {
         Request {
             backend: self.backend,
             output: self.output.clone(),
+            capture: self.capture.or(config).unwrap_or_default(),
         }
+    }
+
+    pub fn request(&self) -> Request {
+        self.request_with(None)
     }
 }
 
@@ -247,7 +258,7 @@ fn real_main() -> Result<i32> {
                     .then(|| config.to.clone())
                     .flatten()
             });
-            let mut backend = detect::detect(&backend.request())?;
+            let mut backend = detect::detect(&backend.request_with(config.capture))?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
                 let receiver = resolve_receiver(to, connect, name)?;
@@ -304,7 +315,11 @@ fn real_main() -> Result<i32> {
             }
         }
         Cmd::Doctor { backend } => {
-            if !doctor::doctor(&backend.request(), args.config.as_deref()) {
+            // A broken config is reported by doctor itself.
+            let capture = load_config(args.config.as_deref())
+                .ok()
+                .and_then(|c| c.capture);
+            if !doctor::doctor(&backend.request_with(capture), args.config.as_deref()) {
                 return Ok(detect::EXIT_UNSUPPORTED);
             }
         }

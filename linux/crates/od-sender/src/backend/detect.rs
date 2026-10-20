@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 
 use super::adopt::AdoptBackend;
+use super::capture::{self, CaptureChoice, CapturePath, CaptureSelection, Offered};
 use super::hyprland::{HyprlandBackend, ipc};
 use super::wlroots::WlrootsBackend;
 use super::{Backend, BackendId};
@@ -46,6 +47,8 @@ impl Environment {
 pub struct Request {
     pub backend: Option<BackendId>,
     pub output: Option<String>,
+    /// `--capture` / config `capture`.
+    pub capture: CaptureChoice,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -419,17 +422,58 @@ pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
     }
 }
 
-/// Detect from the process environment.
+/// Detect from the process environment and choose the capture protocol.
 pub fn detect(req: &Request) -> Result<Box<dyn Backend>> {
-    let walk = decide(
-        &Environment::from_process(),
-        req,
-        &mut crate::wayland::registry::snapshot,
-    );
+    let snapshot = crate::wayland::registry::snapshot();
+    let walk = decide(&Environment::from_process(), req, &mut || match &snapshot {
+        Ok(s) => Ok(s.clone()),
+        Err(e) => Err(anyhow!("{e:#}")),
+    });
     for s in &walk.steps {
         tracing::debug!("detect: {s}");
     }
-    instantiate(walk.decision)
+    let mut backend = instantiate(walk.decision)?;
+    match choose_capture(backend.as_ref(), req.capture, snapshot.as_ref().ok())? {
+        Some(sel) => {
+            tracing::info!("capture: {} ({})", sel.path, sel.reason);
+            backend.set_capture(sel.path);
+        }
+        None => {
+            if req.capture != CaptureChoice::Auto {
+                tracing::warn!(
+                    "--capture/config `capture` ignored: {} captures over PipeWire",
+                    backend.id()
+                );
+            }
+            tracing::info!("capture: n/a (PipeWire)");
+        }
+    }
+    Ok(backend)
+}
+
+/// The capture protocol for `backend` (backend/capture.rs), or `None` for a
+/// backend that captures over PipeWire. Without a registry snapshot both
+/// protocols are assumed offered; capture then reports what is missing.
+pub fn choose_capture(
+    backend: &dyn Backend,
+    choice: CaptureChoice,
+    snapshot: Option<&Snapshot>,
+) -> Result<Option<CaptureSelection>> {
+    if !backend.wayland_capture() {
+        return Ok(None);
+    }
+    let offered = snapshot.map_or(
+        Offered {
+            ext: true,
+            wlr: true,
+        },
+        |s| Offered {
+            ext: s.has(CapturePath::Ext.global())
+                && s.has("ext_output_image_capture_source_manager_v1"),
+            wlr: s.has(CapturePath::Wlr.global()),
+        },
+    );
+    capture::select(choice, backend.capture_preference(), offered).map(Some)
 }
 
 /// Apply `--instance <sig|index>` to this process: point both the Hyprland
@@ -451,6 +495,51 @@ pub fn select_instance(sig_or_index: &str) -> Result<super::hyprland::instance::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeBackend {
+        wayland: bool,
+    }
+
+    impl Backend for FakeBackend {
+        fn id(&self) -> BackendId {
+            BackendId::Kde
+        }
+        fn describe(&self) -> String {
+            "fake".into()
+        }
+        fn caps(&self) -> super::super::Caps {
+            super::super::Caps {
+                cursor_metadata: false,
+                dmabuf: false,
+                resize_in_place: false,
+                creates_outputs: false,
+            }
+        }
+        fn wayland_capture(&self) -> bool {
+            self.wayland
+        }
+        fn set_capture(&mut self, _: CapturePath) {}
+        fn open(
+            &mut self,
+            _: &super::super::DisplaySpec,
+        ) -> Result<Box<dyn super::super::VirtualDisplay>> {
+            unreachable!()
+        }
+        fn clean(&mut self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn pipewire_backends_take_no_capture_choice() {
+        let pw = FakeBackend { wayland: false };
+        assert_eq!(choose_capture(&pw, CaptureChoice::Wlr, None).unwrap(), None);
+        let wl = FakeBackend { wayland: true };
+        let sel = choose_capture(&wl, CaptureChoice::Auto, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sel.path, CapturePath::Ext);
+    }
 
     fn full_globals() -> Snapshot {
         Snapshot {
@@ -580,8 +669,8 @@ mod tests {
 
         // An explicit --output still means adopt, even on Sway.
         let req = Request {
-            backend: None,
             output: Some("HEADLESS-2".into()),
+            ..Default::default()
         };
         let (w, _) = run(&env, &req, Some(globals));
         assert_eq!(
@@ -660,7 +749,7 @@ mod tests {
         let env = Environment::default();
         let force = |b| Request {
             backend: Some(b),
-            output: None,
+            ..Default::default()
         };
         let (w, _) = run(&env, &force(BackendId::Hyprland), None);
         assert!(unsupported(&w).contains("--instance"));
@@ -717,7 +806,7 @@ mod tests {
         // Forced, outside a KDE session, still decided by the globals.
         let forced = Request {
             backend: Some(BackendId::Kde),
-            output: None,
+            ..Default::default()
         };
         let plain = Environment {
             wayland_display: Some("wayland-0".into()),

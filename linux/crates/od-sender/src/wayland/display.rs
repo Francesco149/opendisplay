@@ -10,6 +10,7 @@ use tracing::warn;
 use super::capture::CaptureThread;
 use super::cursor::{CursorSpace, CursorThread};
 use super::input::InputInjector;
+use crate::backend::capture::CapturePath;
 use crate::backend::lock::OutputLock;
 use crate::backend::{
     CaptureOptions, CursorSink, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
@@ -41,13 +42,16 @@ pub struct CapturedDisplay<O: OutputControl> {
     output: O,
     /// Held for the display's lifetime; see [`crate::backend::lock`].
     _lock: OutputLock,
+    /// The protocol frames are captured with (backend/capture.rs).
+    capture_path: CapturePath,
     /// Set once the output was removed or deliberately kept.
     released: bool,
 }
 
 impl<O: OutputControl> CapturedDisplay<O> {
-    pub fn new(output: O, lock: OutputLock) -> Self {
+    pub fn new(output: O, lock: OutputLock, capture_path: CapturePath) -> Self {
         Self {
+            capture_path,
             capture: None,
             cursor: None,
             frames: None,
@@ -81,7 +85,12 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
             c.stop();
         }
         let shared = Arc::new(Mutex::new(sink));
-        self.capture = Some(spawn_frames(&self.output.info().name, opts, &shared)?);
+        self.capture = Some(spawn_frames(
+            &self.output.info().name,
+            opts,
+            self.capture_path,
+            &shared,
+        )?);
         self.frames = Some((shared, opts));
         Ok(())
     }
@@ -97,7 +106,12 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
             c.stop();
         }
         let opts = CaptureOptions { cursor: painted };
-        self.capture = Some(spawn_frames(&self.output.info().name, opts, &shared)?);
+        self.capture = Some(spawn_frames(
+            &self.output.info().name,
+            opts,
+            self.capture_path,
+            &shared,
+        )?);
         self.frames = Some((shared, opts));
         Ok(())
     }
@@ -142,12 +156,14 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
 fn spawn_frames(
     name: &str,
     opts: CaptureOptions,
+    path: CapturePath,
     shared: &Arc<Mutex<FrameSink>>,
 ) -> Result<CaptureThread> {
     let shared = shared.clone();
     CaptureThread::spawn(
         name,
         opts,
+        path,
         Box::new(move |ev| (shared.lock().unwrap_or_else(|e| e.into_inner()))(ev)),
     )
 }
@@ -208,7 +224,10 @@ mod tests {
             log: log.clone(),
         };
         let lock = lock_output(&name).unwrap();
-        (Box::new(CapturedDisplay::new(fake, lock)), log)
+        (
+            Box::new(CapturedDisplay::new(fake, lock, CapturePath::Ext)),
+            log,
+        )
     }
 
     /// Lock files outlive their locks; tidy the runtime dir.
