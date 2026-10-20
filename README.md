@@ -6,7 +6,7 @@
 
 **Turn your spare devices into second monitors for your Mac — free, open source, no subscription.**
 
-iPhone, iPad, spare Macs, and Android (beta); a Linux sender is in beta too. A self-hosted
+iPhone, iPad, spare Macs, and Android (beta); a Linux sender and receiver are in beta too. A self-hosted
 alternative to Apple Sidecar, Duet Display, and Luna Display: true extended
 display (not just mirroring), Retina-sharp, over USB or WiFi, with touch and
 scroll input.
@@ -283,12 +283,13 @@ on Apple silicon (Asahi)**; x86_64 is expected to work. **Sway 1.10+, KDE
 Plasma 6.8+ and GNOME 50+** are experimental. Video is CPU-encoded for now
 (VA-API planned), and the stream is not encrypted, so use a network you trust.
 
-An AUR package (`yay -S opendisplay-sender`, available once
-`linux-v0.1.0-beta.1` is tagged) and prebuilt x86_64/aarch64 tarballs come
-with the `linux-v*` pre-releases on the
-[releases page](https://github.com/peetzweg/opendisplay/releases); until then,
-build it from source ([linux/README.md#from-source](linux/README.md#from-source)).
-Then, with the OpenDisplay app open on the receiver:
+Install it from the
+[`linux-v0.1.0-beta.1` pre-release](https://github.com/peetzweg/opendisplay/releases/tag/linux-v0.1.0-beta.1):
+the x86_64/aarch64 tarball with its `install.sh` works on any distribution,
+and on Arch / Omarchy you can instead build the package from this repository
+with `makepkg -si`
+([linux/README.md#install](linux/README.md#install)). Then, with the
+OpenDisplay app open on the receiver:
 
 ```sh
 od-sender doctor              # what it will use on this desktop
@@ -298,20 +299,21 @@ od-sender run --to iPhone     # or just `od-sender run` with one receiver on the
 Setup, the supported matrix, desktop notes, troubleshooting and how to report
 a problem are in [linux/README.md](linux/README.md).
 
-### Linux receiver (preview)
+### Linux receiver (beta)
 
-`od-receiver` turns a Linux machine into the display. It runs today when built
-from source, with software decoding, and shows a Linux desktop sent by
-`od-sender`. Packages, hardware decoding, a full-screen kiosk mode and testing
-with the Mac sender come with its beta; progress is tracked in
-[#284](https://github.com/peetzweg/opendisplay/issues/284) and the plan in
-[linux/PLAN.md](linux/PLAN.md).
+`od-receiver` turns a Linux machine's screen into the display, for a Mac or
+a Linux desktop. It is tested windowed on Asahi Linux / Hyprland (aarch64),
+at 24 ms end to end; other desktops are expected to work. Install it from
+the same pre-release as a Flatpak bundle (any distribution) or, on Arch /
+Omarchy, build its package from this repository with `makepkg -si`; see
+[linux/README.md#linux-receiver-beta](linux/README.md#linux-receiver-beta).
+Reports go to [#284](https://github.com/peetzweg/opendisplay/issues/284).
 
 ## Compatible apps
 
 The official apps cover a Mac sender, a Linux sender in beta (see above),
 receivers for iPhone/iPad (iOS 15+), Mac and Android (beta), and a Linux
-receiver in preview.
+receiver in beta.
 Other people have built their own clients that speak the same protocol, so
 you can also use an Android device or an older iPad as a display, or drive
 one from Linux. The wire protocol is specified in

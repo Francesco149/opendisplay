@@ -2,18 +2,19 @@
 
 Status: **draft, not tagged, not released.** Written 2026-10-20 against
 `linux-plan`. The `linux-release.yml` workflow writes its own notes (install
-lines for the AUR and the tarballs, the linked FFmpeg/x264 versions, the
-source checksum for the AUR) when the tag is pushed. The text below is meant
+lines for the tarballs, the Arch package and the receiver's Flatpak, the
+linked FFmpeg/x264 versions, the source checksum the PKGBUILD pins) when the
+tag is pushed. The text below is meant
 to replace or precede them with `gh release edit linux-v0.1.0-beta.1
 --notes-file …` once the release exists. Before publishing, re-check:
 Android (first live session works, 2026-10-20; the functional checklist of
 touch, scroll, rotation, lock and quit is pending, so it is still "expected
-to work" below), the AUR package name being live, and the CI state of the
-smoke jobs.
+to work" below) and the CI state of the smoke jobs. AUR registration is
+closed, so this beta ships without an AUR package.
 
 ---
 
-## OpenDisplay Linux sender 0.1.0 beta 1
+## OpenDisplay for Linux 0.1.0 beta 1: sender and receiver
 
 `od-sender` extends a Linux desktop onto an OpenDisplay receiver: an iPhone,
 iPad, Android device or spare Mac running the OpenDisplay app. It creates a
@@ -39,13 +40,17 @@ experimental. Reports help a lot (see the end).
 
 ### Install
 
-* **Arch Linux / Omarchy:** `yay -S opendisplay-sender`
-* **Other distributions:** the `x86_64` and `aarch64` tarballs below; they
-  need glibc 2.38+ and PipeWire (`libpipewire-0.3`), not FFmpeg. Unpack and
-  run `./install.sh`: it installs `od-sender` into `~/.local/bin` with a
-  desktop entry and a `systemd --user` unit pointing at it
-  (`sudo ./install.sh --system` for `/usr/local`; `--uninstall` removes
-  them).
+* **Any distribution:** the `x86_64` and `aarch64` tarballs below; they
+  need glibc 2.38+ (2.39+ on aarch64) and PipeWire (`libpipewire-0.3`), not
+  FFmpeg. Unpack and run `./install.sh`: it installs `od-sender` into
+  `~/.local/bin` with a desktop entry and a `systemd --user` unit pointing
+  at it (`sudo ./install.sh --system` for `/usr/local`; `--uninstall`
+  removes them).
+* **Arch Linux / Omarchy:** build the package from the repository (against
+  your system FFmpeg; about 2.5 minutes):
+  `git clone https://github.com/peetzweg/opendisplay && cd opendisplay/linux/packaging/arch/opendisplay-sender && makepkg -si`.
+  Update with `git pull && makepkg -si` in the same directory. An AUR
+  package follows once AUR registration reopens.
 * **From source:** see [linux/README.md](https://github.com/peetzweg/opendisplay/blob/main/linux/README.md#from-source).
 
 Then open the OpenDisplay app on the receiver, on the same network, and run:
@@ -80,6 +85,22 @@ od-sender run             # the only receiver found; or: od-sender run --to iPho
 * On Hyprland before 0.57, screen capture uses wlr-screencopy, which survives
   displays disappearing mid-capture (Hyprland 0.56's other capture path can
   crash there); `--capture` overrides.
+
+### Linux receiver (beta)
+
+`od-receiver` turns a Linux machine's screen into the display, for a Mac or
+a Linux desktop: a GTK 4 window that fills the screen when a sender
+connects, draws the sender's cursor and sends pointer input back. Tested
+windowed on Asahi Linux / Hyprland (aarch64) at 24 ms end to end; other
+desktops are expected to work. Software decoding through GStreamer, VA-API
+when `gst-plugin-va` is installed.
+
+* **Any distribution:** `flatpak install --user od-receiver-<arch>.flatpak`
+  from the files below (the GNOME 50 runtime comes from Flathub), then start
+  "OpenDisplay Receiver".
+* **Arch Linux / Omarchy:** as for the sender, in
+  `linux/packaging/arch/opendisplay-receiver`: `makepkg -si`;
+  `systemctl --user enable --now od-receiver` starts it with your session.
 
 ### Known issues
 

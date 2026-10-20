@@ -17,6 +17,9 @@ network you trust.
 Video is encoded on the CPU for now (x264); hardware encoding (VA-API) is
 planned.
 
+The other direction, a Linux machine as the display, is the
+[Linux receiver](#linux-receiver-beta), also in beta.
+
 ## Supported setups
 
 Tested on **Omarchy / Hyprland 0.56 on Apple silicon (Asahi Linux)**; x86_64
@@ -41,32 +44,20 @@ use and about 60 ms of latency, against ~20 ms for a phone.
 
 ## Install
 
-### Arch / Omarchy (AUR)
+Two ways, both from the
+[`linux-v0.1.0-beta.1` pre-release](https://github.com/peetzweg/opendisplay/releases/tag/linux-v0.1.0-beta.1)
+(Linux releases are pre-releases, so they do not show up as "Latest").
 
-Available once `linux-v0.1.0-beta.1` is tagged:
+### Prebuilt tarball (any distribution)
 
-```sh
-yay -S opendisplay-sender
-```
-
-This builds from source (Rust and clang are pulled in as build dependencies;
-the build and its tests take about 2.5 minutes on an 8-core M1 Pro, longer on
-smaller machines) and installs `/usr/bin/od-sender`, a desktop entry (it shows
-up in the Omarchy menu and opens in a terminal) and a `systemd --user` unit,
-`od-sender@.service`, for starting it on login. The prebuilt tarballs below
-are the quick path.
-
-### Other distributions
-
-Prebuilt `x86_64` and `aarch64` tarballs are attached to the `linux-v*`
-pre-releases on the [releases page](https://github.com/peetzweg/opendisplay/releases).
-They link a minimal FFmpeg and x264 statically, so no FFmpeg install is
-needed; they run on glibc 2.38 or newer on x86_64 (Ubuntu 24.04, Debian 13,
-Fedora 39 and later) and glibc 2.39 or newer on aarch64 (Ubuntu 24.04,
-Debian 13, Fedora 40 and later), and need PipeWire's library,
-`libpipewire-0.3`, which every current desktop already has. Licence texts
-for the bundled FFmpeg, x264, OpenH264 and Rust crates are in
-`THIRD-PARTY-LICENSES.txt`. Unpack and run the installer:
+The `x86_64` and `aarch64` tarballs link a minimal FFmpeg and x264
+statically, so no FFmpeg install is needed; they run on glibc 2.38 or newer
+on x86_64 (Ubuntu 24.04, Debian 13, Fedora 39 and later) and glibc 2.39 or
+newer on aarch64 (Ubuntu 24.04, Debian 13, Fedora 40 and later), and need
+PipeWire's library, `libpipewire-0.3`, which every current desktop already
+has. Licence texts for the bundled FFmpeg, x264, OpenH264 and Rust crates
+are in `THIRD-PARTY-LICENSES.txt`. Download the one for your machine
+(`uname -m`), unpack it and run the installer:
 
 ```sh
 tar xf od-sender-*-linux-gnu.tar.gz && cd od-sender-*-linux-gnu
@@ -78,6 +69,26 @@ sudo ./install.sh --system   # or into /usr/local for every user
 `install.sh` points the desktop entry and the unit at the installed binary,
 which KDE Plasma 6.7 and older need (see [KDE Plasma](#kde-plasma)). If
 `~/.local/bin` did not exist before, log out and in so it is on your `PATH`.
+To update, install the next release's tarball the same way.
+
+### Arch / Omarchy: build the package
+
+The repository carries the Arch package's `PKGBUILD`. It builds the release
+tag against your system FFmpeg and installs `/usr/bin/od-sender`, a desktop
+entry (it shows up in the Omarchy menu and opens in a terminal) and a
+`systemd --user` unit, `od-sender@.service`, for starting it on login:
+
+```sh
+sudo pacman -S --needed base-devel git
+git clone https://github.com/peetzweg/opendisplay
+cd opendisplay/linux/packaging/arch/opendisplay-sender
+makepkg -si
+```
+
+`makepkg` pulls in Rust and clang as build dependencies; the build and its
+tests take about 2.5 minutes on an 8-core M1 Pro, longer on smaller
+machines. To update, run `git pull && makepkg -si` in the same directory.
+(An AUR package follows once AUR registration reopens.)
 
 ### From source
 
@@ -239,7 +250,7 @@ the pointer with no dialog. **Plasma 6.7 and older** grant that only to a
 program named by an installed desktop entry: KWin compares the running binary
 with the entry's `Exec=` path. So on 6.7 and older:
 
-1. Install with the AUR package or the tarball's `install.sh` (both install
+1. Install with the Arch package or the tarball's `install.sh` (both install
    `od-sender.desktop` pointing at the installed binary). A binary run from
    elsewhere (a source build in `target/`) is refused.
 2. Log out and in, so KWin sees the entry.
@@ -315,7 +326,7 @@ session.
 ```sh
 systemctl --user disable --now od-sender@iPhone.service   # if you enabled the login unit
 od-sender clean                                          # remove a left-over virtual display
-yay -R opendisplay-sender                                # AUR; tarball: ./install.sh --uninstall
+sudo pacman -R opendisplay-sender                        # Arch package; tarball: ./install.sh --uninstall
 rm -r ~/.config/opendisplay                              # optional: your settings
 ```
 
@@ -353,10 +364,48 @@ with:
 A report that an "expected to work" or experimental setup works is just as
 useful.
 
+## Linux receiver (beta)
+
+`od-receiver` turns a Linux machine's screen into an OpenDisplay display:
+a Mac or a Linux desktop extends onto it like onto an iPad. It is a GTK 4
+window that fills the screen once a sender connects, draws the sender's
+cursor and sends pointer input back. It is tested windowed on Asahi Linux /
+Hyprland (aarch64), at 24 ms end to end; other desktops and fullscreen use
+are expected to work but untested. Decoding runs in software through
+GStreamer (`gst-libav`); VA-API hardware decoding (Intel/AMD,
+`gst-plugin-va`) is used when installed. Like the sender, the stream is not
+encrypted.
+
+**Arch / Omarchy:** build the package from the same checkout as the sender:
+
+```sh
+sudo pacman -S --needed base-devel git
+git clone https://github.com/peetzweg/opendisplay
+cd opendisplay/linux/packaging/arch/opendisplay-receiver
+makepkg -si                                   # update: git pull && makepkg -si
+systemctl --user enable --now od-receiver     # optional: start with your session
+```
+
+**Any distribution:** the Flatpak bundle attached to the
+[pre-release](https://github.com/peetzweg/opendisplay/releases/tag/linux-v0.1.0-beta.1),
+for your machine (`uname -m`). Its GNOME runtime comes from Flathub:
+
+```sh
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user od-receiver-x86_64.flatpak     # or od-receiver-aarch64.flatpak
+flatpak run app.opendisplay.Receiver
+```
+
+Then start "OpenDisplay Receiver" (or `od-receiver`): it advertises itself on
+the network and waits. The Mac sender lists it like any other receiver; on
+Linux, run `od-sender run --to <its hostname>`. `--windowed` keeps
+it in a window, `--output <name>` picks the monitor, `od-receiver --help`
+lists the rest. Problems and reports go to
+[#284](https://github.com/peetzweg/opendisplay/issues/284).
+
 ## Development
 
-The Rust workspace in this directory also holds a Linux receiver
-(`od-receiver`, not part of the beta) and the protocol crates. See
+The Rust workspace in this directory also holds the protocol crates. See
 [PLAN.md](PLAN.md) for the overall plan and [SENDER-PLAN.md](SENDER-PLAN.md)
 for the sender's road to this beta, including how to test without risking
 your own Hyprland session.

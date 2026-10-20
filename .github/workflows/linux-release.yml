@@ -200,7 +200,7 @@ jobs:
         working-directory: dist
         run: sha256sum -c ./*.sha256
 
-      # The AUR package builds from GitHub's tag tarball; its checksum goes
+      # The Arch PKGBUILD builds from GitHub's tag tarball; its checksum goes
       # into the notes so bump.sh's result can be cross-checked.
       - name: Write release notes
         run: |
@@ -211,17 +211,17 @@ jobs:
           x264_commit="$(sed -n 's/^X264_COMMIT=\([0-9a-f]*\).*/\1/p' "$script")"
           src_sha="$(curl -fsSL "https://github.com/${GH_REPO}/archive/refs/tags/${TAG}.tar.gz" | sha256sum | cut -d' ' -f1)"
           cat > notes.md <<EOF
-          Linux sender (\`od-sender\`) ${ver}, beta. Wayland only; tested on Omarchy / Hyprland 0.55+.
+          Linux sender (\`od-sender\`) and receiver (\`od-receiver\`) ${ver}, beta. Wayland only; the sender is tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), x86_64 expected to work.
 
-          **Arch Linux / Omarchy:** \`yay -S opendisplay-sender\` (AUR; builds against your system FFmpeg and gets updates through your AUR helper).
+          **Any distribution:** the tarballs below run on x86_64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later) and aarch64 Linux with glibc 2.39 or newer (Fedora 40 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed; PipeWire (\`libpipewire-0.3\`, present on any current desktop) must be installed. Unpack and run \`./install.sh\` (into \`~/.local\`; \`sudo ./install.sh --system\` for \`/usr/local\`): it installs \`od-sender\`, a desktop entry and a \`systemd --user\` template unit pointing at it. Then run \`od-sender run\`. Each tarball also has the license (GPL-3.0; this build includes GPL x264) and \`PROTOCOL.md\`.
 
-          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed; PipeWire (\`libpipewire-0.3\`, present on any current desktop) must be installed. Unpack and run \`./install.sh\` (into \`~/.local\`; \`sudo ./install.sh --system\` for \`/usr/local\`): it installs \`od-sender\`, a desktop entry and a \`systemd --user\` template unit pointing at it. Then run \`od-sender run\`. Each tarball also has the license (GPL-3.0; this build includes GPL x264) and \`PROTOCOL.md\`.
+          **Arch Linux / Omarchy:** build the package from the repository against your system FFmpeg: \`git clone https://github.com/${GH_REPO} && cd opendisplay/linux/packaging/arch/opendisplay-sender && makepkg -si\` (update: \`git pull && makepkg -si\`; the receiver's package is in \`opendisplay-receiver\` next to it). An AUR package follows once AUR registration reopens.
 
-          **Receiver (\`od-receiver\`), any distribution incl. SteamOS:** \`flatpak install --user od-receiver-<arch>.flatpak\`, then start "OpenDisplay Receiver". It fills the screen when a sender connects.
+          **Receiver (\`od-receiver\`, beta), any distribution:** \`flatpak install --user od-receiver-<arch>.flatpak\`, then start "OpenDisplay Receiver". It fills the screen when a sender connects.
 
           Linked-in sources: FFmpeg [${ffmpeg_tag}](https://github.com/FFmpeg/FFmpeg/tree/${ffmpeg_tag}) and x264 [${x264_commit:0:7}](https://code.videolan.org/videolan/x264/-/tree/${x264_commit}), configured by [\`build-static.sh\`](https://github.com/${GH_REPO}/blob/${TAG}/${script}).
 
-          Source tarball sha256 (AUR): \`${src_sha}\`
+          Source tarball sha256 (PKGBUILD): \`${src_sha}\`
           EOF
           cat notes.md
 
