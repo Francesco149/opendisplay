@@ -119,6 +119,9 @@ pub enum Dev {
         /// Let the encoder convert (no convert stage).
         #[arg(long)]
         no_stage: bool,
+        /// Convert-stage bands [default: one per performance core, at most 8].
+        #[arg(long)]
+        bands: Option<usize>,
         #[arg(long, default_value_t = 0)]
         threads: u16,
         #[arg(long, value_enum, default_value_t = encoder::Backend::X264)]
@@ -146,11 +149,11 @@ pub enum Dev {
     },
 }
 
+/// `--threads`, or one per performance core (all cores on a homogeneous
+/// CPU) when it is 0 (`cpus.rs`).
 pub fn threads_or_all(threads: u16) -> u16 {
     if threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get() as u16)
-            .unwrap_or(4)
+        crate::cpus::default_threads().min(u16::MAX as usize) as u16
     } else {
         threads
     }
@@ -172,11 +175,12 @@ pub fn run(cmd: Dev) -> Result<()> {
             fps,
             copy,
             no_stage,
+            bands,
             threads,
             encoder,
         } => {
             let (w, h) = parse_size(&size)?;
-            pipeline_bench(w, h, seconds, fps, copy, !no_stage, threads, encoder)
+            pipeline_bench(w, h, seconds, fps, copy, !no_stage, bands, threads, encoder)
         }
         Dev::InputTest {
             x,
@@ -348,6 +352,7 @@ fn pipeline_bench(
     fps: u32,
     copy: bool,
     use_stage: bool,
+    bands: Option<usize>,
     threads: u16,
     backend: encoder::Backend,
 ) -> Result<()> {
@@ -384,7 +389,7 @@ fn pipeline_bench(
         max_fps: fps as f32,
         threads: threads_or_all(threads),
     };
-    let stage = encoder::ConvertStage::new();
+    let stage = encoder::ConvertStage::new().with_bands(bands);
     let enc_stage = stage.clone();
     let (raw_tx, raw_rx) = latest::channel::<Frame>();
     let stop = Arc::new(AtomicBool::new(false));

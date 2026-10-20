@@ -57,10 +57,11 @@ pub struct Converter {
 }
 
 /// How many bands to use for a frame `height` rows high, given the
-/// encoder's thread setting (0 = all cores).
+/// encoder's thread setting (0 = the default, one per performance core on a
+/// heterogeneous CPU; `cpus.rs`).
 pub fn band_count(height: u32, threads: u16) -> usize {
     let cores = if threads == 0 {
-        thread::available_parallelism().map_or(4, |n| n.get())
+        crate::cpus::default_threads()
     } else {
         threads as usize
     };

@@ -79,11 +79,20 @@ pub(super) fn new_video(format: Pixel, width: u32, height: u32) -> ff::frame::Vi
 #[derive(Clone, Default)]
 pub struct ConvertStage {
     target: Arc<Mutex<Option<Pixel>>>,
+    /// Band count override (`dev pipeline-bench --bands`); `None` = the
+    /// default for the frame height.
+    bands: Option<usize>,
 }
 
 impl ConvertStage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Convert in exactly `bands` bands (benchmarks only).
+    pub fn with_bands(mut self, bands: Option<usize>) -> Self {
+        self.bands = bands;
+        self
     }
 
     /// Tell the stage what the open encoder takes; call after every
@@ -108,11 +117,12 @@ impl ConvertStage {
         let forward = next.clone();
         let alive = Arc::new(AtomicBool::new(true));
         let guard = Alive(alive.clone());
+        let bands = self.bands;
         let spawned = std::thread::Builder::new()
             .name("convert".into())
             .spawn(move || {
                 let _guard = guard;
-                run(rx, forward);
+                run(rx, forward, bands);
             });
         let stage = self.clone();
         let tx = match spawned {
@@ -146,7 +156,7 @@ impl Drop for Alive {
     }
 }
 
-fn run(rx: latest::Receiver<(Frame, Pixel)>, next: Arc<Mutex<FrameSink>>) {
+fn run(rx: latest::Receiver<(Frame, Pixel)>, next: Arc<Mutex<FrameSink>>, bands: Option<usize>) {
     let pool: Arc<Mutex<Vec<ff::frame::Video>>> = Arc::default();
     let mut converter: Option<(Converter, Pixel)> = None;
     loop {
@@ -170,7 +180,7 @@ fn run(rx: latest::Receiver<(Frame, Pixel)>, next: Arc<Mutex<FrameSink>>) {
             .as_ref()
             .is_none_or(|(c, f)| *f != format || c.dimensions() != (w, h))
         {
-            match Converter::new(w, h, format, band_count(h, 0)) {
+            match Converter::new(w, h, format, bands.unwrap_or_else(|| band_count(h, 0))) {
                 Ok(c) => converter = Some((c, format)),
                 Err(e) => {
                     warn!("convert stage: {e:#}");

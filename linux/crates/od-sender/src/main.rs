@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod cpus;
 mod desktop;
 mod dev;
 mod discover;
@@ -99,7 +100,8 @@ enum Cmd {
         /// H.264 encoder backend (#360) [default: auto, or the config file's].
         #[arg(long, value_enum)]
         encoder: Option<encoder::Backend>,
-        /// Encoder threads (0 = all cores).
+        /// Encoder threads (0 = one per performance core on CPUs with
+        /// efficiency cores, else all cores).
         #[arg(long, default_value_t = 0)]
         threads: u16,
         /// Cursor delivery: `auto` (side channel when the receiver and
