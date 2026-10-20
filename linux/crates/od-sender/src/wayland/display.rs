@@ -1,0 +1,196 @@
+//! [`VirtualDisplay`] for every backend that captures through
+//! `wayland/capture.rs` and injects through `wayland/input.rs`. The backend
+//! supplies only the output side ([`OutputControl`]); this type owns the
+//! ordering rule: capture is stopped and joined before the output is
+//! reconfigured or removed, on every path including drop.
+
+use anyhow::Result;
+use tracing::warn;
+
+use super::capture::CaptureThread;
+use super::input::InputInjector;
+use crate::backend::lock::OutputLock;
+use crate::backend::{
+    CaptureOptions, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
+};
+
+/// The compositor-specific half of a display. Neither method is called while
+/// a capture of the output is running.
+pub trait OutputControl: Send + 'static {
+    fn info(&self) -> &DisplayInfo;
+    fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
+    /// Remove the output (a no-op for outputs the sender did not create).
+    fn remove(&mut self) -> Result<()>;
+}
+
+pub struct CapturedDisplay<O: OutputControl> {
+    capture: Option<CaptureThread>,
+    output: O,
+    /// Held for the display's lifetime; see [`crate::backend::lock`].
+    _lock: OutputLock,
+    /// Set once the output was removed or deliberately kept.
+    released: bool,
+}
+
+impl<O: OutputControl> CapturedDisplay<O> {
+    pub fn new(output: O, lock: OutputLock) -> Self {
+        Self {
+            capture: None,
+            output,
+            _lock: lock,
+            released: false,
+        }
+    }
+
+    fn release(&mut self, keep_output: bool) -> Result<()> {
+        self.stop_capture();
+        if self.released {
+            return Ok(());
+        }
+        self.released = true;
+        if keep_output {
+            return Ok(());
+        }
+        self.output.remove()
+    }
+}
+
+impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
+    fn info(&self) -> &DisplayInfo {
+        self.output.info()
+    }
+
+    fn start_capture(&mut self, opts: CaptureOptions, sink: FrameSink) -> Result<()> {
+        self.stop_capture();
+        self.capture = Some(CaptureThread::spawn(&self.output.info().name, opts, sink)?);
+        Ok(())
+    }
+
+    fn stop_capture(&mut self) {
+        if let Some(mut c) = self.capture.take() {
+            c.stop();
+        }
+    }
+
+    fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()> {
+        self.stop_capture();
+        self.output.reconfigure(spec)
+    }
+
+    fn input(&mut self) -> Result<Box<dyn InputSink>> {
+        let info = self.output.info();
+        Ok(Box::new(InputInjector::start(&info.name, info.scale)?))
+    }
+
+    fn close(mut self: Box<Self>, keep_output: bool) -> Result<()> {
+        self.release(keep_output)
+    }
+}
+
+impl<O: OutputControl> Drop for CapturedDisplay<O> {
+    /// A display dropped without `close` (error path, panic) still stops
+    /// capture first and then removes the output.
+    fn drop(&mut self) {
+        if !self.released {
+            if let Err(e) = self.release(false) {
+                warn!("removing {}: {e:#}", self.output.info().name);
+            }
+        }
+        self.stop_capture();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::backend::Position;
+    use crate::backend::lock::lock_output;
+
+    struct Fake {
+        info: DisplayInfo,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl OutputControl for Fake {
+        fn info(&self) -> &DisplayInfo {
+            &self.info
+        }
+        fn reconfigure(&mut self, _: &DisplaySpec) -> Result<()> {
+            self.log.lock().unwrap().push("reconfigure");
+            Ok(())
+        }
+        fn remove(&mut self) -> Result<()> {
+            self.log.lock().unwrap().push("remove");
+            Ok(())
+        }
+    }
+
+    fn display(tag: &str) -> (Box<dyn VirtualDisplay>, Arc<Mutex<Vec<&'static str>>>) {
+        let name = format!("od-display-test-{tag}-{}", std::process::id());
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let fake = Fake {
+            info: DisplayInfo {
+                name: name.clone(),
+                width: 640,
+                height: 480,
+                refresh_hz: 60.0,
+                scale: 1.0,
+                x: 0,
+                y: 0,
+            },
+            log: log.clone(),
+        };
+        let lock = lock_output(&name).unwrap();
+        (Box::new(CapturedDisplay::new(fake, lock)), log)
+    }
+
+    /// Lock files outlive their locks; tidy the runtime dir.
+    fn forget(name: &str) {
+        let _ = std::fs::remove_file(crate::backend::lock::dir().join(format!("{name}.lock")));
+    }
+
+    #[test]
+    fn close_removes_once_and_keep_output_keeps() {
+        let (d, log) = display("close");
+        let name = d.info().name.clone();
+        d.close(false).unwrap();
+        forget(&name);
+        assert_eq!(*log.lock().unwrap(), ["remove"]);
+
+        let (d, log) = display("keep");
+        let name = d.info().name.clone();
+        d.close(true).unwrap();
+        forget(&name);
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn drop_without_close_removes_the_output() {
+        let (mut d, log) = display("drop");
+        let name = d.info().name.clone();
+        d.reconfigure(&DisplaySpec {
+            name: d.info().name.clone(),
+            width: 800,
+            height: 600,
+            hz: 60,
+            scale: 1.0,
+            position: Position::AutoRight,
+        })
+        .unwrap();
+        drop(d);
+        forget(&name);
+        assert_eq!(*log.lock().unwrap(), ["reconfigure", "remove"]);
+    }
+
+    #[test]
+    fn the_lock_is_held_until_the_display_goes() {
+        let (d, _) = display("lock");
+        let name = d.info().name.clone();
+        assert!(lock_output(&name).is_err());
+        drop(d);
+        drop(lock_output(&name).unwrap());
+        forget(&name);
+    }
+}

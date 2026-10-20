@@ -12,9 +12,6 @@
 //!   shrunk to the stream, so capture is 1:1 and the receiver scales once.
 //! * Only H.264: there is no HEVC encoder on this platform (§3.6).
 
-// Wired into the session by the backend split (`session.rs`).
-#![allow(dead_code)]
-
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -581,11 +578,13 @@ impl<P: Clone + PartialEq> Debounce<P> {
     }
 
     /// The plan currently running.
+    #[allow(dead_code)] // tests; the session keeps its own copy
     pub fn applied(&self) -> Option<&P> {
         self.applied.as_ref()
     }
 
     /// Forget everything, e.g. when the output is torn down.
+    #[allow(dead_code)] // tests; a session ends with its debouncer
     pub fn reset(&mut self) {
         self.applied = None;
         self.pending = None;

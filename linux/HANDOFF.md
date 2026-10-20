@@ -62,7 +62,7 @@ the Mac's `PHONE-STATS` lines, and a note of felt latency / stutter.
 
 ```sh
 RUST_LOG=info od-sender run                     # discovers the first receiver on the LAN
-RUST_LOG=info od-sender run --name iPad         # or filter by Bonjour instance name
+RUST_LOG=info od-sender run --to iPad           # or a Bonjour name/receiver id/host:port
 ```
 
 - A headless output `od-<id>` appears to the right of your monitors, sized from
