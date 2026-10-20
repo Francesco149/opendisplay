@@ -43,8 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Build-time: GStreamer core/base/app/video headers and libwayland for
-      # od-receiver; FFmpeg headers plus libclang (bindgen) for od-sender.
+      # Build-time: GStreamer core/base/app/video headers, GTK 4 and libwayland
+      # for od-receiver; FFmpeg headers plus libclang (bindgen) for od-sender.
       # Run-time: a software H.264 decoder so the fake-sender -> receiver
       # test exercises real decode (into fakesink) on the runner.
       - name: Install system dependencies
@@ -55,7 +55,7 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev \
-            libpipewire-0.3-dev
+            libpipewire-0.3-dev libgtk-4-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
