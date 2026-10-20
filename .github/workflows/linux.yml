@@ -115,20 +115,28 @@ jobs:
           sudo -u builder makepkg --printsrcinfo | diff -u .SRCINFO -
 
       # The packaged /usr/bin/od-sender on a headless Sway (wlroots, pixman,
-      # no GPU): capture via ext-image-copy-capture, input via
-      # zwlr_virtual_pointer_v1 on an output sized through
-      # zwlr_output_manager_v1. See linux/testbench/sway-smoke.sh.
+      # no GPU): adopt and wlroots backends, capture, input placement, a full
+      # stream into od-receiver --sink none, crash recovery with `clean`.
+      # See linux/testbench/sway-smoke.sh.
       - name: Install package and Sway
         working-directory: linux/packaging/arch/opendisplay-sender
         run: |
           pacman -U --noconfirm opendisplay-sender-[0-9]*.pkg.tar.*
           pacman -S --noconfirm --needed sway foot wlr-randr jq
 
+      # The far end for the streaming step: no GStreamer needed for --sink
+      # none. Cargo is still installed from makepkg's makedepends.
+      - name: Build od-receiver (null sink)
+        run: |
+          sudo -u builder -H cargo build --locked --release \
+            --manifest-path linux/Cargo.toml -p od-receiver --no-default-features
+
       - name: Sway headless smoke
         run: |
           install -d -o builder "$RUNNER_TEMP/sway-smoke"
           sudo -u builder -H env LANG=C.UTF-8 \
-            timeout 120 linux/testbench/sway-smoke.sh /usr/bin/od-sender "$RUNNER_TEMP/sway-smoke"
+            OD_RECEIVER="$GITHUB_WORKSPACE/linux/target/release/od-receiver" \
+            timeout 180 linux/testbench/sway-smoke.sh /usr/bin/od-sender "$RUNNER_TEMP/sway-smoke"
 
       - uses: actions/upload-artifact@v4
         if: always()
