@@ -46,7 +46,7 @@
       "Retina / HiDPI (@2x) display matching the device panel",
       "Touch input: tap to click, drag, two-finger scroll",
       "Android receiver for phones and tablets, public beta on Google Play for Android 7.0 and later, over WiFi",
-      "Linux sender in beta, built from source (AUR package and tarballs coming): Hyprland 0.55+ tested; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ experimental",
+      "OpenDisplay Linux sender in beta: tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), x86_64 expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ experimental; CPU encoding (VA-API planned); AUR package and tarballs once linux-v0.1.0-beta.1 is tagged",
       "Linux receiver in preview: turn a Linux machine into a display, built from source",
       "Portrait or landscape virtual display",
       "Hardware H.264 (VideoToolbox) low-latency pipeline",
@@ -126,7 +126,7 @@
         "name": "Does it work on Linux?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Yes, as a sender in beta: od-sender extends a Linux desktop onto any OpenDisplay receiver, with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.55 and newer; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are experimental. An AUR package (opendisplay-sender) and prebuilt tarballs are coming; until then it builds from source. A Linux receiver, which turns a Linux machine into the display, is in preview: it runs from source today, and packages come with its beta."
+          "text": "Yes, as a sender in beta: the OpenDisplay Linux sender (od-sender) adds a virtual display to a Linux desktop and shows it on any OpenDisplay receiver, with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.56 on Apple silicon (Asahi), and x86_64 is expected to work; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are experimental. It encodes on the CPU for now (VA-API is planned). yay -S opendisplay-sender and prebuilt tarballs become available once linux-v0.1.0-beta.1 is tagged; until then it builds from source. The stream is not encrypted, so use a network you trust. A Linux receiver, which turns a Linux machine into the display, is in preview: it runs from source today, and packages come with its beta."
         }
       },
       {

@@ -15,6 +15,10 @@ const ANDROID_BETA_TESTER_URL = "https://play.google.com/apps/testing/com.peetzw
 // Its docs live next to the code in linux/README.md.
 const LINUX_README_URL = "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md"
 const LINUX_FROM_SOURCE_URL = `${LINUX_README_URL}#from-source`
+// Linux releases are GitHub pre-releases, which releases/latest never shows.
+// Until linux-v0.1.0-beta.1 is tagged this lists none; then point it at
+// https://github.com/peetzweg/opendisplay/releases/tag/linux-v0.1.0-beta.1
+const LINUX_RELEASES_URL = "https://github.com/peetzweg/opendisplay/releases?q=linux-v&expanded=true"
 // The Linux receiver (od-receiver) is a preview: it runs from source with
 // software decoding; packages and a kiosk mode are planned (#284).
 const LINUX_RECEIVER_URL = "https://github.com/peetzweg/opendisplay/issues/284"
@@ -242,22 +246,30 @@ export default function App() {
               </div>
               <div className="download-option">
                 <div className="platform">Linux <span className="beta-tag">Beta</span></div>
-                <p className="dl-sub">Extends a Linux desktop onto your iPhone, iPad, Mac or Android device.</p>
+                <p className="dl-sub">
+                  The OpenDisplay Linux sender adds a virtual display to your desktop and shows it on
+                  your iPhone, iPad, Mac or Android device.
+                </p>
                 <a className="btn primary" href={LINUX_README_URL}>
                   Get started
                 </a>
                 <p className="note brew">
-                  Coming soon to the AUR as <code>yay -S opendisplay-sender</code>, with prebuilt
-                  x86_64 and aarch64 tarballs. Today:{" "}
+                  <code>yay -S opendisplay-sender</code> (available once linux-v0.1.0-beta.1 is
+                  tagged), or the x86_64 and aarch64 tarballs from the same pre-release. Today:{" "}
                   <a href={LINUX_FROM_SOURCE_URL}>build from source ↗</a>
                 </p>
                 <p className="note">
-                  Tested on Omarchy / Hyprland&nbsp;0.55+. Experimental: Sway&nbsp;1.10+,
-                  KDE&nbsp;Plasma&nbsp;6.8+ (older Plasma&nbsp;6 through the packaged desktop entry),
-                  GNOME&nbsp;50+.
+                  Tested on Omarchy / Hyprland&nbsp;0.56 on Apple silicon (Asahi); x86_64 expected
+                  to work. Experimental: Sway&nbsp;1.10+, KDE&nbsp;Plasma&nbsp;6.8+ (older
+                  Plasma&nbsp;6 through the packaged desktop entry), GNOME&nbsp;50+.
                 </p>
                 <p className="note">
-                  <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a>
+                  CPU-encoded on Linux for now (VA-API planned). The stream is not encrypted; use a
+                  network you trust.
+                </p>
+                <p className="note">
+                  <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a> ·{" "}
+                  <a href={LINUX_RELEASES_URL}>Pre-releases ↗</a>
                 </p>
               </div>
             </div>
@@ -557,11 +569,14 @@ export default function App() {
             </details>
             <details>
               <summary>Does it work on Linux?</summary>
-              <p>Yes, as a sender in beta: <code>od-sender</code> extends a Linux desktop onto any
-              OpenDisplay receiver, with touch coming back as pointer input. It is tested on
-              Omarchy / Hyprland 0.55 and newer; Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+ are
-              experimental. An AUR package (<code>opendisplay-sender</code>) and prebuilt tarballs
-              are coming; until then it builds from source. See the{" "}
+              <p>Yes, as a sender in beta: the OpenDisplay Linux sender (<code>od-sender</code>)
+              adds a virtual display to a Linux desktop and shows it on any OpenDisplay receiver,
+              with touch coming back as pointer input. It is tested on Omarchy / Hyprland 0.56 on
+              Apple silicon (Asahi), and x86_64 is expected to work; Sway 1.10+, KDE Plasma 6.8+
+              and GNOME 50+ are experimental. It encodes on the CPU for now (VA-API is planned).
+              <code>yay -S opendisplay-sender</code> and prebuilt tarballs become available once
+              linux-v0.1.0-beta.1 is tagged; until then it builds from source. The stream is not
+              encrypted, so use a network you trust. See the{" "}
               <a href={LINUX_README_URL}>Linux README</a> for setup and known issues.</p>
               <p>A Linux <em>receiver</em>, which turns a Linux machine into the display, is in
               preview: it runs from source today, and packages come with its beta.{" "}
