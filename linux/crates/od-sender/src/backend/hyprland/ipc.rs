@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use tracing::warn;
 
 use crate::backend::Position;
 
@@ -158,11 +159,25 @@ impl HyprlandIpc {
         if r.trim() != "ok" {
             bail!("eval failed: {r}");
         }
-        // Hyprland applies monitor rules asynchronously; poll briefly.
+        // Hyprland applies monitor rules asynchronously; poll briefly. It
+        // snaps a fractional scale to one that divides the mode into whole
+        // logical pixels (Android's 2.625 at 1080x2424 becomes 2.6667), so
+        // accept a nearby scale once it has settled.
+        let mut last: Option<f64> = None;
         for _ in 0..20 {
             if let Some(m) = self.monitor(name)? {
-                if m.width == width && m.height == height && (m.scale - scale).abs() < 1e-6 {
-                    return Ok(m);
+                if m.width == width && m.height == height {
+                    if (m.scale - scale).abs() < 1e-6 {
+                        return Ok(m);
+                    }
+                    if scale_snapped(scale, m.scale) && last == Some(m.scale) {
+                        warn!(
+                            "Hyprland adjusted the scale of {name} from {scale} to {}",
+                            m.scale
+                        );
+                        return Ok(m);
+                    }
+                    last = Some(m.scale);
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -179,6 +194,12 @@ impl HyprlandIpc {
     }
 }
 
+/// Whether `got` is Hyprland's snap of the requested fractional `want`
+/// rather than a different rule having won.
+fn scale_snapped(want: f64, got: f64) -> bool {
+    (got - want).abs() <= 0.25
+}
+
 pub fn parse_monitors(json: &str) -> Result<Vec<Monitor>> {
     serde_json::from_str(json).with_context(|| format!("parsing monitors: {json}"))
 }
@@ -186,6 +207,13 @@ pub fn parse_monitors(json: &str) -> Result<Vec<Monitor>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapped_scales_are_accepted_nearby_only() {
+        assert!(scale_snapped(2.625, 2.6666667));
+        assert!(scale_snapped(1.5, 1.6));
+        assert!(!scale_snapped(3.0, 2.0));
+    }
 
     /// `hyprctl -j monitors` on Hyprland 0.56.2 (Asahi, M1 Pro), trimmed of
     /// fields the sender does not read, plus a headless `od-` output.

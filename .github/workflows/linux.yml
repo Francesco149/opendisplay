@@ -76,6 +76,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # Detection and its tests must hold for builds without the optional
+      # backends too (the static tarball or a distro may drop them).
+      - name: Test od-sender without optional backends
+        run: cargo test -p od-sender --no-default-features
+
       - name: Build release binaries
         run: cargo build --workspace --release
 
@@ -155,25 +160,35 @@ jobs:
   # zkde_screencast virtual outputs, PipeWire frames, fake input, a stream
   # into od-receiver --sink none. KWin's virtual backend composites with
   # OpenGL only on a DRM render node; hosted runners have no GPU, so the vgem
-  # module provides one for Mesa's software renderer. Experimental until a
-  # run proves that.
+  # module provides one for Mesa's software renderer (green since
+  # 2026-10-20; a runner kernel without vgem fails it).
   kde-smoke:
-    name: kde smoke (x86_64, experimental)
+    name: kde smoke (x86_64)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
+      # KWin's virtual outputs need OpenGL, which needs a render node. Some
+      # runner kernels ship no vgem module (6.17.0-1022-azure): that is a gap
+      # in the infrastructure, not a regression, so warn and skip.
       - name: Render node (vgem)
+        id: dri
         run: |
           sudo modprobe vgem || {
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe vgem
-          }
-          ls -l /dev/dri
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+              sudo modprobe vgem
+          } || true
+          ls -l /dev/dri || true
+          if ls /dev/dri/renderD* >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::no render node on $(uname -r) (vgem unavailable); KDE smoke skipped"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: KDE smoke in an Arch container
+        if: steps.dri.outputs.available == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/kde-smoke"
           docker run --rm --device /dev/dri \
@@ -187,32 +202,23 @@ jobs:
           path: ${{ runner.temp }}/kde-smoke
           if-no-files-found: ignore
 
-  # GNOME backend: a headless Mutter (no GPU: vgem render node, software
-  # Mesa) with its own session bus, PipeWire and WirePlumber; virtual monitor
+  # GNOME backend: a headless Mutter with its own session bus, PipeWire and
+  # WirePlumber. No GPU or render node needed (Mesa's surfaceless platform;
+  # verified with /dev/dri hidden). Virtual monitor
   # over Mutter's ScreenCast/RemoteDesktop D-Bus APIs, PipeWire frames,
   # pointer input, scale/position, cleanup after kill -9. The run happens
-  # under strace and fails if anything reaches the system bus. Experimental
-  # until a run proves it. See linux/testbench/gnome-smoke.sh.
+  # under strace and fails if anything reaches the system bus. Green since
+  # 2026-10-20, also without a render node. See linux/testbench/gnome-smoke.sh.
   gnome-smoke:
-    name: gnome smoke (x86_64, experimental)
+    name: gnome smoke (x86_64)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
-
-      - name: Render node (vgem)
-        run: |
-          sudo modprobe vgem || {
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe vgem
-          }
-          ls -l /dev/dri
 
       - name: GNOME smoke in an Arch container
         run: |
           mkdir -p "$RUNNER_TEMP/gnome-smoke"
-          docker run --rm --device /dev/dri \
+          docker run --rm \
             -v "$PWD:/src" -v "$RUNNER_TEMP/gnome-smoke:/logs" \
             archlinux:latest bash /src/linux/testbench/gnome-ci-container.sh
 
