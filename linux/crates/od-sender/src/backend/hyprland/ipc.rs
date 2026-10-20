@@ -94,6 +94,7 @@ pub fn position_spec(p: Position) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HyprlandIpc {
     socket: PathBuf,
 }
