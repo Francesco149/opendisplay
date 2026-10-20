@@ -108,7 +108,7 @@ jobs:
       - name: Inspect package
         working-directory: linux/packaging/arch/opendisplay-sender
         run: |
-          pkg="$(ls opendisplay-sender-[0-9]*.pkg.tar.zst)"
+          pkg="$(ls opendisplay-sender-[0-9]*.pkg.tar.*)"
           pacman -Qlp "$pkg"
           namcap PKGBUILD "$pkg"
           # .SRCINFO is what the AUR shows; it must match the PKGBUILD.
