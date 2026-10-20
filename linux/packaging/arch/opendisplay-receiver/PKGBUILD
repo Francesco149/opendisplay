@@ -1,14 +1,16 @@
 # Maintainer: Philip Poloczek <839848+peetzweg@users.noreply.github.com>
 #
-# Source build of the Linux OpenDisplay tools from a checkout:
-#   cd linux/packaging/arch && makepkg -si
-# pacman resolves every build- and run-time dependency. A `-bin` variant for
-# the AUR fetches the CI-built binaries instead; see linux/PLAN.md §3.9.
+# Source build of the Linux receiver (plus the fake sender used to test it)
+# from a checkout:
+#   cd linux/packaging/arch/opendisplay-receiver && makepkg -si
+# pacman resolves every build- and run-time dependency. Not on the AUR until
+# the receiver's own beta; the sender is packaged separately in
+# ../opendisplay-sender so its users do not pull in GStreamer.
 
-pkgname=opendisplay
+pkgname=opendisplay-receiver
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="OpenDisplay receiver and sender for Linux/Wayland: use a Linux box as an extra display, or extend a Linux desktop onto one"
+pkgdesc="OpenDisplay receiver for Linux/Wayland: use a Linux box as an extra display for a Mac"
 arch=('x86_64' 'aarch64')
 url="https://github.com/peetzweg/opendisplay"
 license=('GPL-3.0-only')
@@ -23,21 +25,20 @@ depends=(
   'gst-plugins-bad'
   'gst-libav'                 # avdec_h264: software decode everywhere
   'wayland'
-  'ffmpeg'                    # od-sender: libx264 and V4L2 M2M encoders, swscale
 )
 optdepends=(
   'gst-plugin-va: hardware H.264 decode/encode via VA-API (Intel/AMD)'
   'libva-utils: vainfo for diagnosing the VA-API path'
   'gst-plugin-pipewire: portal-based capture on non-wlroots compositors (future)'
 )
-makedepends=('cargo' 'pkgconf' 'gcc' 'clang')  # clang: bindgen for ffmpeg-sys-next
+makedepends=('cargo' 'pkgconf' 'gcc')
 options=('!lto')  # cargo profile handles LTO
 
 # Built from the enclosing git checkout; the AUR package pins a release tarball.
 source=()
 sha256sums=()
 
-_workspace="$(cd "${startdir}/../.." && pwd)"
+_workspace="$(cd "${startdir}/../../.." && pwd)"
 
 prepare() {
   cd "${_workspace}"
@@ -49,20 +50,19 @@ build() {
   cd "${_workspace}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release --workspace
+  cargo build --frozen --release -p od-receiver -p od-fake-sender
 }
 
 check() {
   cd "${_workspace}"
   export RUSTUP_TOOLCHAIN=stable
   # The fake-sender/receiver end-to-end tests need loopback only.
-  cargo test --frozen --release --workspace
+  cargo test --frozen --release -p od-receiver -p od-fake-sender
 }
 
 package() {
   cd "${_workspace}"
   install -Dm755 target/release/od-receiver    "${pkgdir}/usr/bin/od-receiver"
-  install -Dm755 target/release/od-sender      "${pkgdir}/usr/bin/od-sender"
   install -Dm755 target/release/od-fake-sender "${pkgdir}/usr/bin/od-fake-sender"
   install -Dm644 "${startdir}/od-receiver.desktop" "${pkgdir}/usr/share/applications/od-receiver.desktop"
   install -Dm644 "${startdir}/od-receiver.service" "${pkgdir}/usr/lib/systemd/user/od-receiver.service"

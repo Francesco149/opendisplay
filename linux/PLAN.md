@@ -165,7 +165,7 @@ linux/
                               reconnect). Mirror of tools/fake-receiver.swift.
   flake.nix                   packages.{x86_64,aarch64}-linux, devShell pinning
                               GStreamer/libva/Mesa, nixosModules.receiver-kiosk
-  packaging/arch/PKGBUILD     Omarchy/AUR
+  packaging/arch/            opendisplay-sender (AUR), opendisplay-receiver
 ```
 
 Most work lands in the two portable crates. Decode/present and capture/encode
@@ -265,8 +265,8 @@ port 5353 ever misbehaves.
 
 ### 3.9 Packaging and deployment
 
-* **Omarchy/Arch**: `linux/packaging/arch/PKGBUILD` builds from a checkout
-  (`makepkg -si`; pacman resolves build and run-time deps). Dependency split:
+* **Omarchy/Arch**: `linux/packaging/arch/opendisplay-receiver/PKGBUILD`
+  builds from a checkout (`makepkg -si`; pacman resolves build and run-time deps). Dependency split:
   build-time only `pkgconf cargo gcc`; run-time `gst-plugins-good`,
   `gst-plugins-bad`, `gst-libav` (plugins are dlopen'ed by name, so they must
   stay real deps), optdepends `gst-plugin-va` (x86 hardware), `libva-utils`,
@@ -274,7 +274,9 @@ port 5353 ever misbehaves.
   beyond libwayland today (OpenH264 is compiled in). At first release: AUR
   `opendisplay-bin` pulling the CI-built `x86_64`/`aarch64` binaries, so
   `yay -S opendisplay-bin` is the Omarchy one-liner; ships a `.desktop` entry
-  and a `systemd --user` unit for autostarting the receiver.
+  and a `systemd --user` unit for autostarting the receiver. (Superseded for
+  the sender by `opendisplay-sender`, a source AUR package from `linux-v*`
+  tags: `linux/packaging/arch/opendisplay-sender`, SENDER-PLAN §3.5.)
 * **NixOS**: `flake.nix` with `packages` for both arches, a `devShell`, and
   `nixosModules.receiver-kiosk` = `services.cage.program = od-receiver` +
   autologin-free boot + power-button shutdown. Same binary as Omarchy.
