@@ -78,7 +78,8 @@ impl Backend for AdoptBackend {
 
     fn caps(&self) -> Caps {
         Caps {
-            cursor_metadata: false,
+            // ext-image-copy-capture cursor sessions (wayland/cursor.rs).
+            cursor_metadata: true,
             dmabuf: false,
             resize_in_place: false,
             creates_outputs: false,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use opendisplay_proto::control::{Scroll, Touch, TouchPhase};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::backend::hyprland::ipc::HyprlandIpc;
 use crate::backend::{CaptureEvent, CaptureOptions, DisplaySpec, FrameBuf, Position, detect};
@@ -76,6 +76,26 @@ pub enum Dev {
         /// Write the last frame as a PPM here.
         #[arg(long)]
         save: Option<std::path::PathBuf>,
+    },
+    /// Follow the pointer cursor of an existing output through the
+    /// ext-image-copy-capture cursor session (the cursor side channel's
+    /// source) and log what would be sent: position, enter/leave, sprite.
+    /// Creates nothing. On Hyprland <= 0.56.2, do not remove or disable the
+    /// output while it runs: a pending cursor frame then crashes Hyprland.
+    CursorTest {
+        /// wl_output name, e.g. eDP-1 or an od-… output.
+        #[arg(long)]
+        output: String,
+        #[arg(long, default_value_t = 10.0)]
+        seconds: f64,
+        /// Write the last sprite PNG here.
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        /// Diagnostics: log every session event (constraints, ready/failed)
+        /// and write each captured sprite's raw shm bytes into this directory
+        /// as frame-N.raw with frame-N.txt (size, stride, byte order).
+        #[arg(long, value_name = "DIR")]
+        save_raw: Option<std::path::PathBuf>,
     },
     /// Through the detected backend: open (or adopt) a display, capture and
     /// encode `--frames` frames while moving the pointer over it, scroll
@@ -179,6 +199,12 @@ pub fn run(cmd: Dev) -> Result<()> {
             cursor,
             save,
         } => capture_test(output, seconds, cursor, save),
+        Dev::CursorTest {
+            output,
+            seconds,
+            save,
+            save_raw,
+        } => cursor_test(&output, Duration::from_secs_f64(seconds), save, save_raw),
         Dev::Smoke {
             size,
             frames,
@@ -316,6 +342,125 @@ fn capture_test(
         }
         std::fs::write(&path, ppm)?;
         info!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn cursor_test(
+    output: &str,
+    seconds: Duration,
+    save: Option<std::path::PathBuf>,
+    save_raw: Option<std::path::PathBuf>,
+) -> Result<()> {
+    use crate::backend::CursorEvent;
+    let snap = crate::wayland::registry::snapshot()?;
+    let o = snap
+        .output(output)
+        .with_context(|| format!("no output {output}"))?;
+    let (w, h) = (o.width.max(1) as u32, o.height.max(1) as u32);
+    // As the backends see it: Hyprland reports logical units (see
+    // HyprlandOutput::cursor_space), others the protocol's pixels.
+    let space = match HyprlandIpc::from_env().and_then(|ipc| ipc.monitors()) {
+        Ok(ms) => {
+            let scale = ms
+                .iter()
+                .find(|m| m.name == output)
+                .map_or(1.0, |m| m.scale);
+            let highest = ms.iter().map(|m| m.scale).fold(1.0f64, f64::max);
+            crate::wayland::cursor::CursorSpace {
+                width: w as f64 / scale,
+                height: h as f64 / scale,
+                sprite_scale: highest,
+                theme_size: crate::wayland::cursor::theme_size(),
+            }
+        }
+        Err(_) => crate::wayland::cursor::CursorSpace::pixels(w, h),
+    };
+    info!(
+        "following the cursor on {output} ({w}x{h} px, positions in {:.1}x{:.1}, sprite scale up to {}, theme size {:?}) for {seconds:?}; move the pointer over it",
+        space.width, space.height, space.sprite_scale, space.theme_size
+    );
+    let debug_sink: Option<crate::wayland::cursor::DebugSink> = match save_raw {
+        Some(dir) => {
+            use crate::wayland::cursor::CursorDebug;
+            std::fs::create_dir_all(&dir)?;
+            let mut n = 0u32;
+            Some(Box::new(move |d: CursorDebug| match d {
+                CursorDebug::Raw {
+                    px,
+                    width,
+                    height,
+                    stride,
+                    format,
+                } => {
+                    n += 1;
+                    let base = dir.join(format!("frame-{n}"));
+                    let meta = format!("{width}x{height} stride {stride} order {format}\n");
+                    let r = std::fs::write(base.with_extension("raw"), &px)
+                        .and_then(|_| std::fs::write(base.with_extension("txt"), meta));
+                    match r {
+                        Ok(()) => info!("raw: wrote {}.raw ({} bytes)", base.display(), px.len()),
+                        Err(e) => warn!("raw: {e}"),
+                    }
+                }
+                other => info!("session: {other:?}"),
+            }))
+        }
+        None => None,
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<CursorEvent>();
+    let mut thread = crate::wayland::cursor::CursorThread::spawn_with_debug(
+        output,
+        space,
+        Box::new(move |ev| {
+            let _ = tx.send(ev);
+        }),
+        debug_sink,
+    )?;
+    let start = Instant::now();
+    let (mut moves, mut sprites) = (0u32, 0u32);
+    let mut last_png = None;
+    let mut last_log = Instant::now() - Duration::from_secs(1);
+    while start.elapsed() < seconds {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(CursorEvent::Moved { x, y }) => {
+                moves += 1;
+                if last_log.elapsed() >= Duration::from_millis(250) {
+                    info!("cursor at {x:.4},{y:.4} ({moves} updates)");
+                    last_log = Instant::now();
+                }
+            }
+            Ok(CursorEvent::Hidden) => info!("cursor hidden (left {output})"),
+            Ok(CursorEvent::SpriteUnavailable(why)) => warn!("no sprite: {why}"),
+            Ok(CursorEvent::Image {
+                png,
+                nw,
+                nh,
+                ax,
+                ay,
+            }) => {
+                sprites += 1;
+                info!(
+                    "sprite: {} bytes PNG, {:.4}x{:.4} of the display, hotspot {ax:.3},{ay:.3}",
+                    png.len(),
+                    nw,
+                    nh
+                );
+                last_png = Some(png);
+            }
+            Err(_) => {}
+        }
+    }
+    thread.stop();
+    let rate = moves as f64 / seconds.as_secs_f64();
+    info!("{moves} position updates ({rate:.0}/s), {sprites} sprites");
+    match (save, last_png) {
+        (Some(path), Some(png)) => {
+            std::fs::write(&path, png)?;
+            info!("wrote {}", path.display());
+        }
+        (Some(path), None) => warn!("no sprite arrived; {} not written", path.display()),
+        _ => {}
     }
     Ok(())
 }

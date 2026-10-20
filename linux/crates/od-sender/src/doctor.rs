@@ -195,7 +195,7 @@ fn config_report(explicit: Option<&Path>) -> bool {
                     "  max-fps {}, encoder {}, cursor {}",
                     opt(c.max_fps.map(|f| f.to_string())),
                     opt(c.encoder.map(|e| format!("{e:?}"))),
-                    opt(c.cursor.map(|b| b.to_string()))
+                    opt(c.cursor.map(|m| format!("{m:?}").to_lowercase()))
                 );
                 for (k, l) in &c.receivers {
                     println!("  [receiver.\"{k}\"] {}", layer_line(l));

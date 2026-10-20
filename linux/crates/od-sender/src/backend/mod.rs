@@ -177,7 +177,22 @@ pub trait VirtualDisplay: Send {
     /// output was removed, the compositor stopped the session) the sink gets
     /// one [`CaptureEvent::Ended`] as its last event.
     fn start_capture(&mut self, opts: CaptureOptions, sink: FrameSink) -> Result<()>;
-    /// Stop capture and join its thread. Idempotent.
+    /// Deliver the pointer cursor on its own (position and sprite, for the
+    /// cursor side channel, PROTOCOL §6.3) instead of painting it into the
+    /// frames. Call before [`start_capture`](Self::start_capture) with
+    /// `cursor: false`; [`stop_capture`](Self::stop_capture) stops it too.
+    /// Errs when the compositor cannot; then paint the cursor instead.
+    fn start_cursor(&mut self, _sink: CursorSink) -> Result<()> {
+        bail!("this display cannot deliver the cursor separately")
+    }
+    /// Switch the frames between with and without a painted cursor, without
+    /// touching the output (a new capture session on the same output).
+    /// Used to stop painting once the side channel delivers the cursor, and
+    /// to paint again if it fails.
+    fn set_cursor_painted(&mut self, _painted: bool) -> Result<()> {
+        bail!("this display cannot switch cursor painting")
+    }
+    /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
     /// Resize in place; stops capture first.
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
@@ -237,6 +252,29 @@ pub enum CaptureEvent {
 }
 
 pub type FrameSink = Box<dyn FnMut(CaptureEvent) + Send>;
+
+/// The pointer cursor over a display, for the cursor side channel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CursorEvent {
+    /// Hotspot position, normalized to the display (PROTOCOL §7).
+    Moved { x: f64, y: f64 },
+    /// The cursor left the display (or has no image).
+    Hidden,
+    /// No sprite can be delivered (unsupported format, captures failing):
+    /// the side channel must not be used, paint the cursor instead.
+    SpriteUnavailable(String),
+    /// A new sprite: PNG bytes, its size normalized to the display, the
+    /// hotspot normalized within the sprite.
+    Image {
+        png: Vec<u8>,
+        nw: f64,
+        nh: f64,
+        ax: f64,
+        ay: f64,
+    },
+}
+
+pub type CursorSink = Box<dyn FnMut(CursorEvent) + Send>;
 
 pub trait InputSink: Send {
     fn touch(&mut self, t: &Touch);
