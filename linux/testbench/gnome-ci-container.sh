@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Runs inside `docker run --device /dev/dri -v <checkout>:/src -v <logs>:/logs
-# archlinux:latest` (linux.yml, gnome-smoke): installs Mutter and the build
-# deps, builds od-sender, then gnome-smoke.sh as a user, under strace to
-# prove that nothing in the stack reaches the system bus.
+# Runs inside `docker run -v <checkout>:/src -v <logs>:/logs archlinux:latest`
+# (linux.yml, gnome-smoke): installs Mutter and the build deps, builds
+# od-sender, then gnome-smoke.sh as a user, under strace to prove that
+# nothing in the stack reaches the system bus. No render node needed:
+# headless Mutter renders through Mesa's surfaceless platform.
 set -euo pipefail
 
 pacman -Syu --noconfirm --needed \
@@ -15,10 +16,11 @@ if [ -n "$(getcap /usr/bin/mutter)" ]; then
   install -m755 /usr/bin/mutter /usr/local/bin/mutter
 fi
 useradd --create-home tester
+# Hand the checkout back to the runner's user afterwards, or its post-job
+# git cleanup cannot edit .git/config ("could not lock config file").
+owner="$(stat -c %u:%g /src)"
+trap 'chown -R "$owner" /src /logs' EXIT
 chown -R tester: /src /logs
-# The render node (vgem on hosted runners) belongs to the host's groups.
-chmod a+rw /dev/dri/* 2>/dev/null || true
-ls -l /dev/dri || true
 
 sudo -u tester -H bash -c '
   set -euo pipefail
