@@ -12,6 +12,7 @@ use opendisplay_proto::control::{Scroll, Touch, TouchPhase};
 use tracing::{debug, warn};
 
 use crate::backend::InputSink;
+use crate::bounded::{BoundedThread, DROP_JOIN};
 use wayland_client::protocol::{wl_output, wl_pointer, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
@@ -118,6 +119,7 @@ noop_dispatch!(
 
 pub struct InputInjector {
     tx: mpsc::Sender<InputCmd>,
+    thread: BoundedThread,
 }
 
 impl InputInjector {
@@ -128,16 +130,14 @@ impl InputInjector {
         let (tx, rx) = mpsc::channel::<InputCmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
         let name = output_name.to_string();
-        std::thread::Builder::new()
-            .name("input".into())
-            .spawn(move || {
-                let r = injector_thread(&name, scale, rx, &ready_tx);
-                if let Err(e) = r {
-                    let _ = ready_tx.send(Err(e));
-                }
-            })?;
+        let thread = BoundedThread::spawn("input", move || {
+            let r = injector_thread(&name, scale, rx, &ready_tx);
+            if let Err(e) = r {
+                let _ = ready_tx.send(Err(e));
+            }
+        })?;
         ready_rx.recv().context("input thread died")??;
-        Ok(InputInjector { tx })
+        Ok(InputInjector { tx, thread })
     }
 
     fn send(&self, cmd: InputCmd) {
@@ -161,8 +161,12 @@ impl InputSink for InputInjector {
 }
 
 impl Drop for InputInjector {
+    /// Waits (bounded) for the thread to release a held button and destroy
+    /// the pointer: the compositor keeps the seat's button count, and the
+    /// process may exit right after this.
     fn drop(&mut self) {
         let _ = self.tx.send(InputCmd::Stop);
+        self.thread.join_within(DROP_JOIN);
     }
 }
 
