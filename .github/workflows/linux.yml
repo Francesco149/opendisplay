@@ -77,3 +77,48 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --workspace --release
+
+  # The AUR package, built the way an Arch/Omarchy user's AUR helper builds it
+  # (SENDER-PLAN §4.3 row 1, step 8), from this checkout instead of the tag.
+  # Arch rather than Ubuntu: it is the package's target, and its sway (>= 1.10,
+  # ext-image-copy-capture) hosts the headless smoke test below. x86_64 only:
+  # archlinux:latest has no arm64 image.
+  arch-package:
+    name: arch package (x86_64)
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      # git before checkout, or actions/checkout falls back to a tarball and
+      # from-checkout.sh has nothing to `git archive`.
+      - name: Install base tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git namcap
+          useradd --create-home builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v6
+
+      - name: makepkg opendisplay-sender
+        run: |
+          chown -R builder: "$GITHUB_WORKSPACE"
+          sudo -u builder git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd linux/packaging/arch/opendisplay-sender
+          sudo -u builder ./from-checkout.sh --syncdeps --noconfirm
+
+      - name: Inspect package
+        working-directory: linux/packaging/arch/opendisplay-sender
+        run: |
+          pkg="$(ls opendisplay-sender-[0-9]*.pkg.tar.*)"
+          pacman -Qlp "$pkg"
+          namcap PKGBUILD "$pkg"
+          # .SRCINFO is what the AUR shows; it must match the PKGBUILD.
+          sudo -u builder makepkg --printsrcinfo | diff -u .SRCINFO -
+
+      # TODO(SENDER-PLAN step 8): headless sway smoke against the package.
+      #   pacman -S sway; WLR_BACKENDS=headless WLR_RENDERER=pixman
+      #   WLR_LIBINPUT_NO_DEVICES=1 dbus-run-session sway -c ci.conf &
+      #   swaymsg create_output; swaymsg output HEADLESS-2 mode --custom 640x480@60Hz
+      #   od-receiver --listen 127.0.0.1:9100 --sink none &   (from the workspace)
+      #   timeout 60 /usr/bin/od-sender dev smoke --output HEADLESS-2 \
+      #     --connect 127.0.0.1:9100 --size 640x480 --frames 30
+      # and upload both logs. Waits for `od-sender dev smoke` (step 1).

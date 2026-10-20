@@ -24,7 +24,7 @@ short "what to do next" list.
 
 ```sh
 git clone https://github.com/peetzweg/opendisplay && cd opendisplay && git checkout linux-plan
-cd linux/packaging/arch && makepkg -si          # 1) first real run of the PKGBUILD; pacman pulls deps
+cd linux/packaging/arch/opendisplay-receiver && makepkg -si  # 1) first real run of the PKGBUILD; pacman pulls deps
 vainfo                                          # 2) which VAProfileH264* entrypoints exist (VLD = decode, EncSlice = encode)
 gst-inspect-1.0 vah264dec | head -5             #    present once gst-plugin-va is installed
 gst-inspect-1.0 vah264enc vah264lpenc 2>/dev/null | grep -E 'Long-name|Rank'
