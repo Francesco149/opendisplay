@@ -6,10 +6,10 @@
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
-use super::ipc::{Rect, SwayIpc};
+use super::ipc::SwayIpc;
 use super::outman::{self, Target};
 use super::record::{self, Record};
-use crate::backend::{DisplayInfo, DisplaySpec, Position};
+use crate::backend::{DisplayInfo, DisplaySpec, LayoutRect, place};
 use crate::wayland::display::OutputControl;
 
 pub struct WlrootsOutput {
@@ -17,37 +17,6 @@ pub struct WlrootsOutput {
     /// `od-<id>`: the lock and record key.
     lock_name: String,
     info: DisplayInfo,
-}
-
-/// Top-left of a `w`x`h` (logical) output placed next to `others`.
-pub fn place(position: Position, w: i32, h: i32, others: &[Rect]) -> (i32, i32) {
-    if others.is_empty() {
-        return match position {
-            Position::At(x, y) => (x, y),
-            _ => (0, 0),
-        };
-    }
-    let right = |r: &Rect| r.x + r.width;
-    let bottom = |r: &Rect| r.y + r.height;
-    match position {
-        Position::At(x, y) => (x, y),
-        Position::AutoRight => {
-            let edge = others.iter().max_by_key(|r| right(r)).unwrap();
-            (right(edge), edge.y)
-        }
-        Position::AutoLeft => {
-            let edge = others.iter().min_by_key(|r| r.x).unwrap();
-            (edge.x - w, edge.y)
-        }
-        Position::AutoDown => {
-            let edge = others.iter().max_by_key(|r| bottom(r)).unwrap();
-            (edge.x, bottom(edge))
-        }
-        Position::AutoUp => {
-            let edge = others.iter().min_by_key(|r| r.y).unwrap();
-            (edge.x, edge.y - h)
-        }
-    }
 }
 
 impl WlrootsOutput {
@@ -104,10 +73,15 @@ impl OutputControl for WlrootsOutput {
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()> {
         let name = self.info.name.clone();
         let outputs = self.ipc.outputs()?;
-        let others: Vec<Rect> = outputs
+        let others: Vec<LayoutRect> = outputs
             .iter()
             .filter(|o| o.active && o.name != name)
-            .map(|o| o.rect)
+            .map(|o| LayoutRect {
+                x: o.rect.x,
+                y: o.rect.y,
+                width: o.rect.width,
+                height: o.rect.height,
+            })
             .collect();
         let (lw, lh) = (
             (spec.width as f64 / spec.scale).round() as i32,
@@ -155,32 +129,5 @@ impl OutputControl for WlrootsOutput {
         record::remove(&self.lock_name);
         info!("removed virtual display {}", self.info.name);
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn r(x: i32, y: i32, width: i32, height: i32) -> Rect {
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn placement_next_to_the_layout() {
-        let laptop = r(0, 0, 1512, 982);
-        let left = r(-1920, -100, 1920, 1080);
-        let both = [laptop, left];
-        assert_eq!(place(Position::AutoRight, 800, 600, &both), (1512, 0));
-        assert_eq!(place(Position::AutoLeft, 800, 600, &both), (-2720, -100));
-        assert_eq!(place(Position::AutoDown, 800, 600, &both), (0, 982));
-        assert_eq!(place(Position::AutoUp, 800, 600, &both), (-1920, -700));
-        assert_eq!(place(Position::At(5, 6), 800, 600, &both), (5, 6));
-        assert_eq!(place(Position::AutoRight, 800, 600, &[]), (0, 0));
     }
 }

@@ -20,7 +20,8 @@
 #    while it moves the pointer (fake input), KWin's active output must be
 #    the virtual one; afterwards the output is gone.
 # 3. `run --backend kde` into `od-receiver --sink none`: the receiver's
-#    1024x768 scale-2 hello gives a 1024x768 stream.
+#    1024x768 scale-2 hello gives a 1024x768 output at scale 2 (set through
+#    kde_output_management_v2) and a 1024x768 stream.
 # 4. Crash: `kill -9` a running sender; KWin drops its output by itself.
 set -euo pipefail
 
@@ -38,6 +39,9 @@ if [ -z "${OD_KDE_INNER:-}" ]; then
     XDG_DATA_HOME="$runtime/data" XDG_STATE_HOME="$runtime/state" \
     XDG_CACHE_HOME="$runtime/cache" XDG_CURRENT_DESKTOP=KDE LANG="${LANG:-C.UTF-8}" \
     GIO_USE_VFS=local GVFS_DISABLE_FUSE=1 # no gvfs FUSE mount inside $runtime
+  # No system bus at all: nothing in this stack may reach BlueZ, logind,
+  # NetworkManager or UPower on the host. A client that tries just fails.
+  export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$runtime/no-system-bus"
   OD_KDE_INNER=1 dbus-run-session -- "$0" "$sender" "$logdir"
   exit
 fi
@@ -107,7 +111,7 @@ cat "$logdir/smoke.log"
 grep -q "smoke ok" "$logdir/smoke.log" || { echo "dev smoke did not pass"; exit 1; }
 [ -n "$seen" ] || { echo "the pointer never reached Virtual-od-smoke (fake input)"; exit 1; }
 echo "fake input moved the pointer onto Virtual-od-smoke"
-outputs | grep -qx "Virtual-od-smoke" && { echo "Virtual-od-smoke left behind"; exit 1; }
+outputs | grep -x "Virtual-od-smoke" >/dev/null && { echo "Virtual-od-smoke left behind"; exit 1; }
 
 if [ -n "${OD_RECEIVER:-}" ]; then
   port=$((20000 + RANDOM % 10000))
@@ -122,10 +126,32 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   "$sender" run --to "127.0.0.1:$port" --backend kde --duration 4 > "$logdir/run.log" 2>&1 ||
     { cat "$logdir/run.log"; echo "od-sender run failed"; exit 1; }
   cat "$logdir/run.log"
-  grep -q "virtual display Virtual-od-[0-9a-f]* = 1024x768" "$logdir/run.log" ||
-    { echo "output not 1024x768 pixels"; exit 1; }
+  # kde_output_management_v2 sets the hello's scale (KWin alone picks one
+  # from DPI) and places the output right of the existing one.
+  grep -q "virtual display Virtual-od-[0-9a-f]* = 1024x768 @60 scale 2 at 1280,0" "$logdir/run.log" ||
+    { echo "output not 1024x768 at scale 2, right of Virtual-0"; exit 1; }
   grep -q "streamConfig h264 1024x768" "$logdir/receiver.log" ||
     { echo "receiver saw no 1024x768 streamConfig"; exit 1; }
+
+  echo "--- run --position auto-left"
+  # KWin refuses negative positions, so the existing output moves right;
+  # after the sender exits it is back at 0,0.
+  "$sender" run --to "127.0.0.1:$port" --backend kde --duration 2 --position auto-left \
+    > "$logdir/left.log" 2>&1 || { cat "$logdir/left.log"; echo "od-sender run failed"; exit 1; }
+  cat "$logdir/left.log"
+  grep -q "virtual display Virtual-od-[0-9a-f]* = 1024x768 @60 scale 2 at 0,0" "$logdir/left.log" ||
+    { echo "auto-left output not at 0,0"; exit 1; }
+  # The xdg-output update trails KWin's "applied" a little.
+  back=
+  for _ in $(seq 40); do
+    # Not `doctor | grep -q`: grep exits early, doctor dies of SIGPIPE and
+    # pipefail turns a match into a failure.
+    layout="$("$sender" doctor 2>/dev/null || true)"
+    grep -q "^  output Virtual-0 .* at 0,0$" <<< "$layout" && { back=1; break; }
+    sleep 0.05
+  done
+  [ -n "$back" ] || { "$sender" doctor; echo "Virtual-0 not back at 0,0"; exit 1; }
+  echo "Virtual-0 is back at 0,0"
 
   echo "--- crash"
   "$sender" run --to "127.0.0.1:$port" --backend kde --duration 30 > "$logdir/crash.log" 2>&1 &
@@ -141,7 +167,7 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   wait "$run_pid" 2>/dev/null || true
   gone=
   for _ in $(seq 30); do
-    outputs | grep -qx "$made" || { gone=1; break; }
+    outputs | grep -x "$made" >/dev/null || { gone=1; break; }
     sleep 0.1
   done
   [ -n "$gone" ] || { echo "$made outlived its sender"; exit 1; }

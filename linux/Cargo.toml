@@ -38,6 +38,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Client code for the KDE protocols in crates/od-sender/protocols.
 wayland-scanner = "0.31"
 wayland-backend = "0.3"
+# Bitfield enums in generated protocol code.
+bitflags = "2"
 # KDE: KWin hands virtual outputs out as PipeWire streams.
 pipewire = "0.10"
 gstreamer = "0.25"
