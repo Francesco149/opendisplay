@@ -220,6 +220,15 @@ pub trait Backend: Send {
     /// backends that fix it when the output is created rather than per
     /// capture. Called before the first [`open`](Self::open).
     fn set_cursor_visible(&mut self, _visible: bool) {}
+    /// Whether [`show_workspace`](Self::show_workspace) works here.
+    fn supports_workspaces(&self) -> bool {
+        false
+    }
+    /// Show workspace `name` (a name or number) on `output`, leaving the
+    /// user's focus where it was. Called after every open and recreation.
+    fn show_workspace(&mut self, _output: &str, _name: &str) -> Result<()> {
+        bail!("workspaces are not supported on this desktop")
+    }
     /// The output lock [`open`](Self::open) takes for `spec`.
     fn lock_name(&self, spec: &DisplaySpec) -> String {
         spec.name.clone()

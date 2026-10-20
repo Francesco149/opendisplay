@@ -114,6 +114,11 @@ enum Cmd {
         /// auto-down, or "x,y" [default: auto-right, or the config file's].
         #[arg(long)]
         position: Option<Position>,
+        /// Show this workspace (name or number) on the virtual output, without
+        /// taking focus from your current monitor. Hyprland and Sway [default:
+        /// the next free one, or the config file's].
+        #[arg(long, value_name = "NAME|ID")]
+        workspace: Option<String>,
         /// Leave the virtual output in place when the sender exits (development).
         #[arg(long)]
         keep_output: bool,
@@ -241,6 +246,7 @@ fn real_main() -> Result<i32> {
             cursor,
             no_cursor,
             position,
+            workspace,
             keep_output,
             no_reconnect,
             duration,
@@ -251,6 +257,7 @@ fn real_main() -> Result<i32> {
                 position,
                 scale,
                 bitrate_mbps,
+                workspace,
             };
             let eff = cli.over(&config.defaults).over(&config::builtin());
             let to = to.or_else(|| {
@@ -279,6 +286,7 @@ fn real_main() -> Result<i32> {
                             cursor.or(config.cursor).unwrap_or_default()
                         },
                         position: eff.position.unwrap_or(Position::AutoRight),
+                        workspace: eff.workspace.clone(),
                         keep_output,
                         reconnect: !no_reconnect,
                         duration: duration.map(Duration::from_secs_f64),

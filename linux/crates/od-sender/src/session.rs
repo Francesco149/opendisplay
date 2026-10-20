@@ -60,6 +60,8 @@ pub struct RunOptions {
     pub cursor: CursorMode,
     /// Where the virtual output goes.
     pub position: Position,
+    /// Workspace to show on the virtual output (`--workspace`).
+    pub workspace: Option<String>,
     /// Leave the virtual output in place when the session ends.
     pub keep_output: bool,
     pub reconnect: bool,
@@ -90,6 +92,7 @@ impl RunOptions {
             .over(&config::builtin());
         RunOptions {
             position: eff.position.unwrap_or(self.position),
+            workspace: eff.workspace.or_else(|| self.workspace.clone()),
             bitrate_mbps: eff.bitrate_mbps.unwrap_or(self.bitrate_mbps),
             desktop: DesktopOptions {
                 scale: eff.scale.unwrap_or(self.desktop.scale),
@@ -482,6 +485,9 @@ fn build(
             None
         }
     };
+    if let Some(ws) = &opts.workspace {
+        place_workspace(backend, &display.info().name, ws);
+    }
     let stream = stream_for(display.info(), &target);
     *active = Some(Active {
         input,
@@ -492,6 +498,25 @@ fn build(
         held_position: None,
     });
     Ok(stream)
+}
+
+/// Show `--workspace` on the display; a desktop without the feature says
+/// so once per process, and a failure never ends the session.
+fn place_workspace(backend: &mut dyn Backend, output: &str, ws: &str) {
+    static UNSUPPORTED_SAID: AtomicBool = AtomicBool::new(false);
+    if !backend.supports_workspaces() {
+        if !UNSUPPORTED_SAID.swap(true, Ordering::Relaxed) {
+            warn!(
+                "--workspace is not supported on this desktop ({}); ignoring it",
+                backend.id()
+            );
+        }
+        return;
+    }
+    match backend.show_workspace(output, ws) {
+        Ok(()) => info!("workspace {ws} on {output}"),
+        Err(e) => warn!("could not show workspace {ws} on {output}: {e:#}"),
+    }
 }
 
 /// Resolves to `true` on SIGINT, SIGTERM or SIGHUP. Handled explicitly so the output
@@ -1049,6 +1074,7 @@ mod tests {
             encoder: crate::encoder::Backend::Auto,
             cursor: CursorMode::Auto,
             position: Position::AutoRight,
+            workspace: None,
             keep_output: false,
             reconnect: false,
             duration: None,

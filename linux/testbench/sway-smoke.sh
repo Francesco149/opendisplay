@@ -26,6 +26,8 @@
 #    on the right output at the right place (dev smoke cannot check that).
 # 7. `od-sender dev smoke --backend wlroots`: the backend creates, sizes,
 #    captures and removes its own output.
+#    With `--workspace 8`, workspace 8 must be visible on that output while
+#    the user's focused workspace stays focused.
 # 8. `od-sender run --backend wlroots` against `od-receiver --sink none`: the
 #    receiver's hello sizes the output (scale 2), the redrawing window is
 #    moved onto it, and the receiver must report the stream config and a
@@ -136,6 +138,25 @@ before="$(outputs)"
   tee "$logdir/smoke-wlroots.log"
 grep -q "smoke ok" "$logdir/smoke-wlroots.log" || { echo "wlroots dev smoke did not pass"; exit 1; }
 [ "$(outputs)" = "$before" ] || { echo "dev smoke left an output behind"; exit 1; }
+
+echo "--- workspace"
+# --workspace: workspace 8 lands on the sender's output and is visible there,
+# while the user's focused workspace stays focused.
+focused_ws() { swaymsg -t get_workspaces -r | jq -r '.[] | select(.focused) | .name'; }
+user_ws="$(focused_ws)"
+"$sender" dev smoke --backend wlroots --size 800x600 --frames 5 --workspace 8 --hold 3 \
+  >"$logdir/smoke-workspace.log" 2>&1 &
+ws_pid=$!
+ws_out=""
+for _ in $(seq 40); do
+  ws_out="$(swaymsg -t get_workspaces -r | jq -r '.[] | select(.name == "8" and .visible) | .output')"
+  [ -n "$ws_out" ] && break
+  sleep 0.1
+done
+wait "$ws_pid" || { cat "$logdir/smoke-workspace.log"; echo "workspace smoke failed"; exit 1; }
+[ -n "$ws_out" ] && [ "$ws_out" != "$out" ] || { echo "workspace 8 not shown on the sender's output (got '$ws_out')"; exit 1; }
+[ "$(focused_ws)" = "$user_ws" ] || { echo "focus moved from $user_ws to $(focused_ws)"; exit 1; }
+echo "workspace 8 shown on $ws_out; focus stayed on $user_ws"
 
 if [ -n "${OD_RECEIVER:-}" ]; then
   port=$((20000 + RANDOM % 10000))
