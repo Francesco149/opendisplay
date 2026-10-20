@@ -16,7 +16,8 @@ use super::protocols::output_device::{
     kde_output_device_v2 as kdevice,
 };
 use super::protocols::output_management::{
-    kde_output_configuration_v2 as kconfig, kde_output_management_v2 as kmgmt,
+    kde_mode_list_v2 as kmodelist, kde_output_configuration_v2 as kconfig,
+    kde_output_management_v2 as kmgmt,
 };
 use crate::backend::{LayoutRect, Position, place};
 use crate::wayland::dispatch_with_timeout;
@@ -30,6 +31,8 @@ struct Device {
     scale: f64,
     enabled: bool,
     current_mode: Option<ObjectId>,
+    /// Every mode the device announced, in order.
+    modes: Vec<kmode::KdeOutputDeviceModeV2>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,8 +44,11 @@ enum Outcome {
 #[derive(Default)]
 struct State {
     management: Option<kmgmt::KdeOutputManagementV2>,
+    management_version: u32,
     devices: HashMap<ObjectId, Device>,
     modes: HashMap<ObjectId, (i32, i32)>,
+    /// mHz per mode.
+    refresh: HashMap<ObjectId, i32>,
     outcome: Option<Outcome>,
     reason: Option<String>,
 }
@@ -179,6 +185,63 @@ pub fn configure(name: &str, scale: f64, position: Position) -> Result<Placement
     })
 }
 
+/// Switch `name` to `width`x`height` at `refresh_mhz`, adding a custom mode
+/// first when the output has none (management v18+; KWin's virtual outputs
+/// only come with 60 Hz). Returns the refresh the output then reports.
+pub fn set_refresh(name: &str, width: i32, height: i32, refresh_mhz: i32) -> Result<i32> {
+    let (conn, mut queue, mut st, management) = session()?;
+    let qh = queue.handle();
+    if st.management_version < 18 {
+        bail!(
+            "kde_output_management_v2 v{} has no custom modes (needs v18, Plasma 6.3)",
+            st.management_version
+        );
+    }
+    let find = |st: &State| -> Option<(
+        kdevice::KdeOutputDeviceV2,
+        Option<kmode::KdeOutputDeviceModeV2>,
+    )> {
+        let d = st.devices.values().find(|d| d.name == name)?;
+        let m = d
+            .modes
+            .iter()
+            .find(|m| {
+                st.modes.get(&m.id()) == Some(&(width, height))
+                    && st
+                        .refresh
+                        .get(&m.id())
+                        .is_some_and(|r| (r - refresh_mhz).abs() < 500)
+            })
+            .cloned();
+        Some((d.proxy.clone()?, m))
+    };
+    let (device, mut mode) = find(&st).with_context(|| format!("no KDE output device {name}"))?;
+    if mode.is_none() {
+        let list = management.create_mode_list(&qh, ());
+        list.set_resolution(width as u32, height as u32);
+        list.set_refresh_rate(refresh_mhz as u32);
+        list.add_mode();
+        let config = management.create_configuration(&qh, ());
+        config.set_custom_modes(&device, &list);
+        apply(&conn, &mut queue, &mut st, config)
+            .with_context(|| format!("KWin refused a {width}x{height}@{refresh_mhz}mHz mode"))?;
+        list.destroy();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while mode.is_none() && Instant::now() < deadline {
+            dispatch_with_timeout(&conn, &mut queue, &mut st, Duration::from_millis(50))?;
+            mode = find(&st).and_then(|(_, m)| m);
+        }
+    }
+    let mode = mode.with_context(|| {
+        format!("KWin announced no {width}x{height}@{refresh_mhz}mHz mode for {name}")
+    })?;
+    let config = management.create_configuration(&qh, ());
+    config.mode(&device, &mode);
+    apply(&conn, &mut queue, &mut st, config)
+        .with_context(|| format!("KWin refused to switch {name} to {refresh_mhz}mHz"))?;
+    Ok(st.refresh.get(&mode.id()).copied().unwrap_or(refresh_mhz))
+}
+
 /// After `gone` was removed: move the remaining outputs back so the layout
 /// starts at 0,0 again, undoing the shift a left/up placement made.
 pub fn restore_origin(gone: &str) -> Result<()> {
@@ -256,6 +319,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         match interface.as_str() {
             "kde_output_management_v2" => {
                 state.management = Some(registry.bind(name, version.min(22), qh, ()));
+                state.management_version = version.min(22);
             }
             // KWin >= 6.5 announces devices through a registry object.
             "kde_output_device_registry_v2" => {
@@ -321,6 +385,7 @@ impl Dispatch<kdevice::KdeOutputDeviceV2, ()> for State {
             kdevice::Event::Scale { factor } => d.scale = factor,
             kdevice::Event::Enabled { enabled } => d.enabled = enabled != 0,
             kdevice::Event::CurrentMode { mode } => d.current_mode = Some(mode.id()),
+            kdevice::Event::Mode { mode } => d.modes.push(mode),
             kdevice::Event::Removed => {
                 state.devices.remove(&device.id());
             }
@@ -342,8 +407,14 @@ impl Dispatch<kmode::KdeOutputDeviceModeV2, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let kmode::Event::Size { width, height } = event {
-            state.modes.insert(mode.id(), (width, height));
+        match event {
+            kmode::Event::Size { width, height } => {
+                state.modes.insert(mode.id(), (width, height));
+            }
+            kmode::Event::Refresh { refresh } => {
+                state.refresh.insert(mode.id(), refresh);
+            }
+            _ => {}
         }
     }
 }
@@ -370,6 +441,18 @@ impl Dispatch<kmgmt::KdeOutputManagementV2, ()> for State {
         _: &mut Self,
         _: &kmgmt::KdeOutputManagementV2,
         _: kmgmt::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<kmodelist::KdeModeListV2, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &kmodelist::KdeModeListV2,
+        _: kmodelist::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,

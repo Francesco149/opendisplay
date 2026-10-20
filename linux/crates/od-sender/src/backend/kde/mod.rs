@@ -160,6 +160,29 @@ impl KdeDisplay {
         }
     }
 
+    /// The output once wl_output reports the refresh `mhz` (it follows the
+    /// mode switch asynchronously).
+    fn refreshed(&self, name: &str, mhz: i32) -> Option<OutputSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut last = None;
+        while Instant::now() < deadline {
+            if let Some(o) = registry::snapshot().ok()?.output(name).cloned() {
+                if (o.refresh_mhz - mhz).abs() < 500 {
+                    return Some(o);
+                }
+                last = Some(o);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if let Some(o) = &last {
+            warn!(
+                "{name} reports {} mHz after switching to {mhz}",
+                o.refresh_mhz
+            );
+        }
+        last
+    }
+
     /// The output as wl_output/xdg-output report it once a configuration
     /// reached them (they follow kde_output_management asynchronously).
     fn settled(&self, name: &str, scale: f64, pos: (i32, i32)) -> Option<OutputSnapshot> {
@@ -223,6 +246,21 @@ impl KdeDisplay {
                 o.name,
                 o.fractional_scale()
             ),
+        }
+        // KWin's virtual outputs only come with 60 Hz; a ProMotion/120 Hz
+        // receiver gets a custom mode (kde_output_management_v2 v18+).
+        if self.spec.hz > 60 {
+            let want = self.spec.hz as i32 * 1000;
+            match outputs::set_refresh(&o.name, o.width, o.height, want) {
+                Ok(_) => {
+                    o = self.refreshed(&o.name, want).unwrap_or(o);
+                }
+                Err(e) => warn!(
+                    "{}: staying at {:.0} Hz: {e:#}",
+                    o.name,
+                    o.refresh_mhz as f64 / 1000.0
+                ),
+            }
         }
         let scale = o.fractional_scale();
         self.info = DisplayInfo {

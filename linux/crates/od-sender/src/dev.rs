@@ -141,6 +141,9 @@ pub enum Dev {
         /// Where the output goes.
         #[arg(long, default_value = "auto-right")]
         position: Position,
+        /// Refresh rate to ask for.
+        #[arg(long, default_value_t = 60)]
+        hz: u32,
         #[command(flatten)]
         backend: crate::BackendArgs,
     },
@@ -257,11 +260,12 @@ pub fn run(cmd: Dev) -> Result<()> {
             timeout,
             scale,
             position,
+            hz,
             backend,
         } => smoke(
             &backend.request(),
             &size,
-            (scale, position),
+            (scale, position, hz),
             frames,
             Duration::from_secs_f64(timeout),
         ),
@@ -718,7 +722,7 @@ fn parse_size(s: &str) -> Result<(u32, u32)> {
 fn smoke(
     req: &detect::Request,
     size: &str,
-    (scale, position): (f64, Position),
+    (scale, position, hz): (f64, Position, u32),
     frames: u32,
     timeout: Duration,
 ) -> Result<()> {
@@ -729,7 +733,7 @@ fn smoke(
         name: "od-smoke".into(),
         width,
         height,
-        hz: 60,
+        hz,
         scale,
         position,
     };
