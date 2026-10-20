@@ -45,7 +45,10 @@ chmod 700 "$runtime"
 export XDG_RUNTIME_DIR="$runtime"
 # od-receiver persists its id under XDG_STATE_HOME; keep it out of $HOME.
 export XDG_STATE_HOME="$runtime/state"
-unset WAYLAND_DISPLAY SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE DISPLAY
+unset WAYLAND_DISPLAY SWAYSOCK HYPRLAND_INSTANCE_SIGNATURE DISPLAY DBUS_SESSION_BUS_ADDRESS
+# No system bus: nothing here may reach logind, BlueZ or NetworkManager on
+# the host (headless wlroots needs no seat). A client that tries just fails.
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=$runtime/no-system-bus"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 export LANG="${LANG:-C.UTF-8}"
 
@@ -89,7 +92,7 @@ windows() { swaymsg -t get_tree -r | jq -r '.. | select(.app_id? == "left" or .a
 spawn() {  # spawn <app-id> <command>
   swaymsg -q "exec foot -c /dev/null --app-id $1 -- sh -c '$2'"
   for _ in $(seq 50); do
-    windows | grep -qx "$1" && return
+    windows | grep -x "$1" >/dev/null && return
     sleep 0.1
   done
   echo "foot window $1 did not map"; exit 1
@@ -173,7 +176,7 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   best="$(grep -o '"fps":[0-9.]*' "$logdir/receiver.log" | cut -d: -f2 | sort -n | tail -1)"
   echo "receiver: best fps ${best:-0}"
   awk -v f="${best:-0}" 'BEGIN { exit !(f >= 20) }' || { echo "receiver fps ${best:-0} < 20"; exit 1; }
-  outputs | grep -qx "$made" && { echo "$made still present after the sender exited"; exit 1; }
+  outputs | grep -x "$made" >/dev/null && { echo "$made still present after the sender exited"; exit 1; }
 
   echo "--- crash and clean"
   start_receiver
@@ -186,16 +189,16 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   kill -9 "$run_pid"
   wait "$run_pid" 2>/dev/null || true
   stop_receiver
-  outputs | grep -qx "$made" || { echo "$made vanished with the sender"; exit 1; }
+  outputs | grep -x "$made" >/dev/null || { echo "$made vanished with the sender"; exit 1; }
   "$sender" doctor 2>&1 | grep -- "-> $made" || { echo "doctor does not list $made"; exit 1; }
   "$sender" clean --backend wlroots 2>&1 | tee "$logdir/clean.log"
-  outputs | grep -qx "$made" && { echo "clean left $made"; exit 1; }
+  outputs | grep -x "$made" >/dev/null && { echo "clean left $made"; exit 1; }
 else
   echo "--- OD_RECEIVER not set: skipping the streaming and crash steps"
 fi
 
 echo "--- teardown"
 swaymsg -q output "$out" unplug
-outputs | grep -qx "$out" && { echo "$out still present after unplug"; exit 1; }
+outputs | grep -x "$out" >/dev/null && { echo "$out still present after unplug"; exit 1; }
 kill -0 "$sway_pid" || { echo "sway exited"; exit 1; }
 echo "sway smoke passed: $frames frames, input on $out"
