@@ -1,0 +1,140 @@
+name: Linux release
+
+# Linux sender releases are cut by hand, by pushing a `linux-v*` tag:
+#   git tag linux-v0.1.0-beta.1 && git push origin linux-v0.1.0-beta.1
+# They stay out of release-please (release.yml runs on pushes to main and owns
+# the plain `v*` tags; it ignores `linux-`-prefixed tags as another
+# component's), so a Linux release never triggers a Mac/iOS build and an app
+# release never ships Linux binaries. See linux/SENDER-PLAN.md §8.1.
+#
+# The release is never marked "Latest": the website's Mac download buttons
+# resolve releases/latest/download/OpenDisplay.dmg.
+on:
+  push:
+    tags: ["linux-v*"]
+
+concurrency:
+  group: linux-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    name: od-sender (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: linux
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # The sender only: Wayland and FFmpeg headers, libclang for bindgen,
+      # nasm for OpenH264's x86 assembly. No GStreamer.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev \
+            nasm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # linux-v0.1.0-beta.1 must belong to crate version 0.1.0, so
+      # `od-sender --version` names the release it came from.
+      - name: Check tag against crate version
+        run: |
+          ver="${TAG#linux-v}"
+          crate="$(cargo pkgid -p od-sender | sed 's/.*[#@]//')"
+          if [ "${ver%%-*}" != "$crate" ]; then
+            echo "::error::tag $TAG does not match od-sender version $crate"
+            exit 1
+          fi
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: cargo test --locked --release -p od-sender
+
+      - name: Build
+        run: cargo build --locked --release -p od-sender
+
+      - name: Package
+        run: |
+          name="od-sender-${VERSION}-${{ matrix.arch }}-unknown-linux-gnu"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage" "$RUNNER_TEMP/dist"
+          install -m755 target/release/od-sender "$stage/"
+          install -m644 packaging/arch/opendisplay-sender/od-sender.desktop \
+                        packaging/arch/opendisplay-sender/od-sender@.service \
+                        ../LICENSE ../PROTOCOL.md "$stage/"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/dist/$name.tar.gz" "$name"
+          (cd "$RUNNER_TEMP/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          tar -tzvf "$RUNNER_TEMP/dist/$name.tar.gz"
+          cat "$RUNNER_TEMP/dist/$name.tar.gz.sha256"
+          # Record what it links: these sonames are why the notes send Arch
+          # users to the AUR (SENDER-PLAN §3.5).
+          readelf -d target/release/od-sender | grep NEEDED
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: od-sender-${{ matrix.arch }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c ./*.sha256
+
+      # The AUR package builds from GitHub's tag tarball; its checksum goes
+      # into the notes so bump.sh's result can be cross-checked.
+      - name: Write release notes
+        run: |
+          ver="${TAG#linux-v}"
+          src_sha="$(curl -fsSL "https://github.com/${GH_REPO}/archive/refs/tags/${TAG}.tar.gz" | sha256sum | cut -d' ' -f1)"
+          cat > notes.md <<EOF
+          Linux sender (\`od-sender\`) ${ver}, beta. Wayland only; tested on Omarchy / Hyprland 0.55+.
+
+          **Arch Linux / Omarchy: install from the AUR** (\`yay -S opendisplay-sender\`). It builds against your system FFmpeg.
+
+          The tarballs below are built on Ubuntu 24.04 against its FFmpeg 6.1 (\`libavcodec.so.60\`) and need that same FFmpeg major at run time, so they will not start on Arch or other distributions with a newer FFmpeg. Each contains \`od-sender\`, a desktop entry, a \`systemd --user\` template unit, the license, and \`PROTOCOL.md\`.
+
+          Source tarball sha256 (AUR): \`${src_sha}\`
+          EOF
+          cat notes.md
+
+      # Always a pre-release while the sender is in beta; never "Latest".
+      - name: Create pre-release
+        run: |
+          gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "Linux sender ${TAG#linux-v}" \
+            --notes-file notes.md
