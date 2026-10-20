@@ -187,8 +187,8 @@ named by an installed desktop entry, so there it works with the packaged
 position are set like on the other desktops. Plasma does not allow outputs at
 negative coordinates, so `--position auto-left` or `auto-up` puts the new
 output at the top left and shifts your other screens right or down; they move
-back when the sender exits, but not after a crash (then open System Settings →
-Display once, or start the sender again).
+back when the sender exits, but not after a crash: then rearrange them in
+System Settings → Display, or start the sender again, which lines them up.
 
 ### GNOME
 
