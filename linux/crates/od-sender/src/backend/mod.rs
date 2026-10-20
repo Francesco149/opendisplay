@@ -85,6 +85,46 @@ impl FromStr for Position {
 }
 use Position::At;
 
+/// An output's place in the compositor's global layout, logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Top-left of a `w`x`h` (logical) output placed next to `others`.
+pub fn place(position: Position, w: i32, h: i32, others: &[LayoutRect]) -> (i32, i32) {
+    if others.is_empty() {
+        return match position {
+            Position::At(x, y) => (x, y),
+            _ => (0, 0),
+        };
+    }
+    let right = |r: &LayoutRect| r.x + r.width;
+    let bottom = |r: &LayoutRect| r.y + r.height;
+    match position {
+        Position::At(x, y) => (x, y),
+        Position::AutoRight => {
+            let edge = others.iter().max_by_key(|r| right(r)).unwrap();
+            (right(edge), edge.y)
+        }
+        Position::AutoLeft => {
+            let edge = others.iter().min_by_key(|r| r.x).unwrap();
+            (edge.x - w, edge.y)
+        }
+        Position::AutoDown => {
+            let edge = others.iter().max_by_key(|r| bottom(r)).unwrap();
+            (edge.x, bottom(edge))
+        }
+        Position::AutoUp => {
+            let edge = others.iter().min_by_key(|r| r.y).unwrap();
+            (edge.x, edge.y - h)
+        }
+    }
+}
+
 /// What the session asks for, derived from `hello` (SENDER-PLAN §3.6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplaySpec {
@@ -345,5 +385,32 @@ mod tests {
         );
         assert_eq!("3024x0".parse::<Position>().unwrap(), Position::At(3024, 0));
         assert!("center".parse::<Position>().is_err());
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::{LayoutRect, Position, place};
+
+    fn r(x: i32, y: i32, width: i32, height: i32) -> LayoutRect {
+        LayoutRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn placement_next_to_the_layout() {
+        let laptop = r(0, 0, 1512, 982);
+        let left = r(-1920, -100, 1920, 1080);
+        let both = [laptop, left];
+        assert_eq!(place(Position::AutoRight, 800, 600, &both), (1512, 0));
+        assert_eq!(place(Position::AutoLeft, 800, 600, &both), (-2720, -100));
+        assert_eq!(place(Position::AutoDown, 800, 600, &both), (0, 982));
+        assert_eq!(place(Position::AutoUp, 800, 600, &both), (-1920, -700));
+        assert_eq!(place(Position::At(5, 6), 800, 600, &both), (5, 6));
+        assert_eq!(place(Position::AutoRight, 800, 600, &[]), (0, 0));
     }
 }
