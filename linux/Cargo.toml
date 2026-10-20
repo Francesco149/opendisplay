@@ -44,6 +44,10 @@ bitflags = "2"
 pipewire = "0.10"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
+# Receiver window: GTK 4 presents the decoded frames (gtk4paintablesink,
+# linked in from gst-plugins-rs) and delivers pointer input.
+gtk4 = { version = "0.11", features = ["v4_14"] }
+gst-plugin-gtk4 = { version = "0.15", features = ["wayland", "dmabuf", "gtk_v4_14"] }
 openh264 = { version = "0.9", features = ["source"] }
 # Encoder + swscale only; ffmpeg-next needs `format` to compile, never used.
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }

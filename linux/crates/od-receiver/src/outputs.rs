@@ -20,8 +20,11 @@ pub struct OutputInfo {
 }
 
 impl OutputInfo {
-    pub fn refresh_hz(&self) -> u32 {
-        ((self.refresh_mhz as f64) / 1000.0).round().max(1.0) as u32
+    /// Whole Hz, or `None` when the output does not know (headless and
+    /// virtual outputs report 0): announcing that as 1 Hz would cap the
+    /// sender at one frame per second.
+    pub fn refresh_hz(&self) -> Option<u32> {
+        (self.refresh_mhz >= 1000).then(|| ((self.refresh_mhz as f64) / 1000.0).round() as u32)
     }
 }
 
@@ -132,5 +135,25 @@ pub fn pick(outputs: &[OutputInfo], name: Option<&str>) -> Result<OutputInfo> {
                 )
             }),
         None => outputs.first().cloned().context("no Wayland outputs found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutputInfo;
+
+    #[test]
+    fn unknown_refresh_is_absent_not_one_hertz() {
+        let o = |refresh_mhz| OutputInfo {
+            name: "HEADLESS-1".into(),
+            description: String::new(),
+            width: 1280,
+            height: 720,
+            refresh_mhz,
+            scale: 1,
+        };
+        assert_eq!(o(0).refresh_hz(), None);
+        assert_eq!(o(59_940).refresh_hz(), Some(60));
+        assert_eq!(o(119_800).refresh_hz(), Some(120));
     }
 }
