@@ -8,13 +8,14 @@ use std::collections::VecDeque;
 use std::sync::Once;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use ff::format::Pixel;
 use ff::util::color;
 use ffmpeg_next as ff;
 use opendisplay_proto::video::{AccessUnit, NalType, access_units, nal_units};
 
 use super::convert::{Converter, band_count};
+use super::stage::{YuvFrame, new_video};
 use super::{Encoded, EncoderSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,11 +115,7 @@ impl FfmpegEncoder {
 
         let convert = Converter::new(width, height, format, band_count(height, s.threads))?;
 
-        let mut yuv = ff::frame::Video::new(format, width, height);
-        yuv.set_color_space(color::Space::BT709);
-        yuv.set_color_primaries(color::Primaries::BT709);
-        yuv.set_color_transfer_characteristic(color::TransferCharacteristic::BT709);
-        yuv.set_color_range(color::Range::MPEG);
+        let yuv = new_video(format, width, height);
 
         Ok(Self {
             enc,
@@ -130,6 +127,11 @@ impl FfmpegEncoder {
         })
     }
 
+    /// The 4:2:0 format the encoder was opened with.
+    pub fn format(&self) -> Pixel {
+        self.yuv.format()
+    }
+
     pub fn encode(
         &mut self,
         bgra: &[u8],
@@ -139,13 +141,59 @@ impl FfmpegEncoder {
     ) -> Result<Vec<Encoded>> {
         let t0 = Instant::now();
         self.convert.convert(bgra, stride, &mut self.yuv)?;
-        self.yuv.set_pts(Some(self.pts));
-        self.yuv.set_kind(if force_idr {
+        let mut yuv = std::mem::replace(&mut self.yuv, ff::frame::Video::empty());
+        let out = self.submit(&mut yuv, force_idr, captured_at, t0);
+        self.yuv = yuv;
+        out
+    }
+
+    /// Encode a frame the convert stage already converted. The encoder takes
+    /// a reference to its buffers, no copy; `encode_ms` then excludes the
+    /// conversion.
+    pub fn encode_yuv(
+        &mut self,
+        frame: &YuvFrame,
+        force_idr: bool,
+        captured_at: Instant,
+    ) -> Result<Vec<Encoded>> {
+        let t0 = Instant::now();
+        let v = frame.video();
+        if (v.format(), v.width(), v.height())
+            != (self.yuv.format(), self.yuv.width(), self.yuv.height())
+        {
+            bail!(
+                "converted frame is {:?} {}x{}, the encoder takes {:?} {}x{}",
+                v.format(),
+                v.width(),
+                v.height(),
+                self.yuv.format(),
+                self.yuv.width(),
+                self.yuv.height()
+            );
+        }
+        let mut f = ff::frame::Video::empty();
+        // SAFETY: both frames are valid; av_frame_ref shares the buffers by
+        // reference count (pts and picture type are then set on our copy).
+        if unsafe { ff::ffi::av_frame_ref(f.as_mut_ptr(), v.as_ptr()) } < 0 {
+            bail!("av_frame_ref failed");
+        }
+        self.submit(&mut f, force_idr, captured_at, t0)
+    }
+
+    fn submit(
+        &mut self,
+        frame: &mut ff::frame::Video,
+        force_idr: bool,
+        captured_at: Instant,
+        t0: Instant,
+    ) -> Result<Vec<Encoded>> {
+        frame.set_pts(Some(self.pts));
+        frame.set_kind(if force_idr {
             ff::picture::Type::I
         } else {
             ff::picture::Type::None
         });
-        self.enc.send_frame(&self.yuv).context("send_frame")?;
+        self.enc.send_frame(frame).context("send_frame")?;
         self.in_flight.push_back((self.pts, captured_at, t0));
         // 1/60 s apart in the time base; the encoder only needs monotonic pts.
         self.pts += 16_667;

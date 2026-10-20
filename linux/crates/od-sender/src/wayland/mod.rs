@@ -6,3 +6,4 @@ pub mod cursor;
 pub mod display;
 pub mod input;
 pub mod registry;
+pub mod shm_pool;
