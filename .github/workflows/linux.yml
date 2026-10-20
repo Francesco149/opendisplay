@@ -207,12 +207,11 @@ jobs:
   # verified with /dev/dri hidden). Virtual monitor
   # over Mutter's ScreenCast/RemoteDesktop D-Bus APIs, PipeWire frames,
   # pointer input, scale/position, cleanup after kill -9. The run happens
-  # under strace and fails if anything reaches the system bus. Experimental
-  # until a run proves it. See linux/testbench/gnome-smoke.sh.
+  # under strace and fails if anything reaches the system bus. Green since
+  # 2026-10-20, also without a render node. See linux/testbench/gnome-smoke.sh.
   gnome-smoke:
-    name: gnome smoke (x86_64, experimental)
+    name: gnome smoke (x86_64)
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
