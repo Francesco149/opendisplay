@@ -52,6 +52,7 @@ pub struct Request {
 pub enum Decision {
     Hyprland { socket: PathBuf },
     Wlroots { swaysock: PathBuf },
+    Kde,
     Adopt { output: String },
     Unsupported(String),
 }
@@ -71,6 +72,36 @@ fn has_capture(s: &Snapshot) -> bool {
 
 fn has_input(s: &Snapshot) -> bool {
     s.has("zwlr_virtual_pointer_manager_v1")
+}
+
+fn version_of(s: &Snapshot, interface: &str) -> Option<u32> {
+    s.globals
+        .iter()
+        .find(|(i, _)| i == interface)
+        .map(|(_, v)| *v)
+}
+
+/// KWin: virtual outputs need zkde_screencast v2+, absolute motion needs
+/// fake input v3+. KWin < 6.8 hides both from programs that no .desktop file
+/// lists in X-KDE-Wayland-Interfaces; 6.8 hides them only from sandboxes.
+fn kde_decision(s: &Snapshot) -> Decision {
+    let screencast = version_of(s, "zkde_screencast_unstable_v1");
+    let fake = version_of(s, "org_kde_kwin_fake_input");
+    match (screencast, fake) {
+        (Some(sc), Some(fi)) if sc >= 2 && fi >= 3 => {
+            if cfg!(feature = "kde") {
+                Decision::Kde
+            } else {
+                Decision::Unsupported("this od-sender was built without KDE support (cargo feature `kde`)".into())
+            }
+        }
+        (Some(sc), Some(fi)) => Decision::Unsupported(format!(
+            "KWin is too old: zkde_screencast v{sc} / fake input v{fi}, od-sender needs v2 / v3 (Plasma 5.24+)"
+        )),
+        _ => Decision::Unsupported(
+            "KWin does not offer zkde_screencast_unstable_v1 and org_kde_kwin_fake_input to od-sender. Plasma < 6.8 offers them only to programs listed in a .desktop file's X-KDE-Wayland-Interfaces: install od-sender's package (it ships one for /usr/bin/od-sender) or see `od-sender doctor`; inside Flatpak/Snap they are never offered".into(),
+        ),
+    }
 }
 
 /// What the wlroots backend needs beyond IPC: `capture.rs` speaks only
@@ -195,7 +226,16 @@ pub fn decide(
             };
             return done(steps, d);
         }
-        (Some(b @ (BackendId::Kde | BackendId::Portal)), _) => {
+        (Some(BackendId::Kde), _) => {
+            let d = match registry(&mut steps) {
+                Ok(s) => kde_decision(&s),
+                Err(e) => {
+                    Decision::Unsupported(format!("--backend kde: no Wayland connection ({e})"))
+                }
+            };
+            return done(steps, d);
+        }
+        (Some(b @ BackendId::Portal), _) => {
             return done(
                 steps,
                 Decision::Unsupported(format!("the {b} backend is not implemented yet ({ISSUE})")),
@@ -248,13 +288,11 @@ pub fn decide(
                     .is_some_and(|d| d.split(':').any(|p| p == "KDE"));
             if kde {
                 steps.push(format!(
-                    "KDE session; zkde_screencast_unstable_v1 {}",
-                    yes(s.has("zkde_screencast_unstable_v1"))
+                    "KDE session; zkde_screencast_unstable_v1 {}, org_kde_kwin_fake_input {}",
+                    yes(s.has("zkde_screencast_unstable_v1")),
+                    yes(s.has("org_kde_kwin_fake_input"))
                 ));
-                return done(
-                    steps,
-                    Decision::Unsupported(format!("KDE Plasma is not supported yet ({ISSUE})")),
-                );
+                return done(steps, kde_decision(&s));
             }
         }
     } else {
@@ -338,6 +376,10 @@ pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
     match decision {
         Decision::Hyprland { socket } => Ok(Box::new(HyprlandBackend::connect(socket)?)),
         Decision::Wlroots { swaysock } => Ok(Box::new(WlrootsBackend::connect(swaysock)?)),
+        #[cfg(feature = "kde")]
+        Decision::Kde => Ok(Box::new(super::kde::KdeBackend)),
+        #[cfg(not(feature = "kde"))]
+        Decision::Kde => Err(anyhow!(Unsupported("built without KDE support".into()))),
         Decision::Adopt { output } => Ok(Box::new(AdoptBackend::new(output))),
         Decision::Unsupported(msg) => Err(anyhow!(Unsupported(msg))),
     }
@@ -593,6 +635,8 @@ mod tests {
         let (w, _) = run(&env, &force(BackendId::Wlroots), None);
         assert!(unsupported(&w).contains("SWAYSOCK is not set"));
         let (w, _) = run(&env, &force(BackendId::Kde), None);
+        assert!(unsupported(&w).contains("--backend kde"));
+        let (w, _) = run(&env, &force(BackendId::Portal), None);
         assert!(unsupported(&w).contains("not implemented yet"));
     }
 
@@ -603,8 +647,36 @@ mod tests {
             current_desktop: Some("KDE".into()),
             ..Default::default()
         };
+        // KWin < 6.8 hides both globals from programs no .desktop file lists.
         let (w, _) = run(&env, &Request::default(), Some(Snapshot::default()));
-        assert!(unsupported(&w).starts_with("KDE Plasma"));
+        assert!(unsupported(&w).contains("X-KDE-Wayland-Interfaces"));
+
+        let kwin = |sc: u32, fi: u32| Snapshot {
+            globals: vec![
+                ("zkde_screencast_unstable_v1".into(), sc),
+                ("org_kde_kwin_fake_input".into(), fi),
+            ],
+            outputs: vec![],
+        };
+        let (w, _) = run(&env, &Request::default(), Some(kwin(6, 6)));
+        if cfg!(feature = "kde") {
+            assert_eq!(w.decision, Decision::Kde);
+        }
+        let (w, _) = run(&env, &Request::default(), Some(kwin(1, 2)));
+        assert!(unsupported(&w).contains("too old"));
+        // Forced, outside a KDE session, still decided by the globals.
+        let forced = Request {
+            backend: Some(BackendId::Kde),
+            output: None,
+        };
+        let plain = Environment {
+            wayland_display: Some("wayland-0".into()),
+            ..Default::default()
+        };
+        let (w, _) = run(&plain, &forced, Some(kwin(6, 6)));
+        if cfg!(feature = "kde") {
+            assert_eq!(w.decision, Decision::Kde);
+        }
 
         let env = Environment {
             session_type: Some("x11".into()),

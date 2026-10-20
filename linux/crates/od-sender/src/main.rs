@@ -6,6 +6,8 @@ mod discover;
 mod doctor;
 mod encoder;
 mod latest;
+#[cfg(feature = "pipewire")]
+mod pipewire;
 mod session;
 mod wayland;
 

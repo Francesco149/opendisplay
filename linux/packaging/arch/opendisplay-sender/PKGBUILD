@@ -18,7 +18,8 @@ arch=('x86_64' 'aarch64')
 url="https://opendisplay.app"
 license=('GPL-3.0-only')
 depends=(
-  'ffmpeg'    # libavcodec (libx264, V4L2 M2M) and libswscale; Wayland is pure Rust
+  'ffmpeg'       # libavcodec (libx264, V4L2 M2M) and libswscale; Wayland is pure Rust
+  'libpipewire'  # KDE backend: KWin virtual outputs arrive as PipeWire streams
   'gcc-libs'
   'glibc'
 )

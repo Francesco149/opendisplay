@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
+use super::dispatch_with_timeout;
 use super::shm_pool::{Lease, Mapping, Recycler};
 use crate::backend::{
     CaptureEvent, CaptureOptions, Frame, FrameBuf, FrameSink, PixelFormat, Pixels,
@@ -591,52 +592,6 @@ fn pick_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
         .first()
         .copied()
         .context("session offered no shm formats")
-}
-
-/// `blocking_dispatch` with an upper bound, so a capture of a static output
-/// (which never produces a frame) still notices the stop flag.
-fn dispatch_with_timeout(
-    conn: &Connection,
-    queue: &mut wayland_client::EventQueue<State>,
-    st: &mut State,
-    timeout: Duration,
-) -> Result<()> {
-    use std::os::fd::AsRawFd;
-    queue.dispatch_pending(st)?;
-    conn.flush()?;
-    let Some(guard) = conn.prepare_read() else {
-        queue.dispatch_pending(st)?;
-        return Ok(());
-    };
-    let fd = guard.connection_fd().as_raw_fd();
-    let mut pfd = libc_pollfd(fd);
-    // SAFETY: pollfd points at one valid struct for the duration of the call.
-    let r = unsafe { libc_poll(&mut pfd, 1, timeout.as_millis() as i32) };
-    if r > 0 {
-        let _ = guard.read();
-        queue.dispatch_pending(st)?;
-    }
-    Ok(())
-}
-
-#[repr(C)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
-
-fn libc_pollfd(fd: i32) -> PollFd {
-    PollFd {
-        fd,
-        events: 0x001, /* POLLIN */
-        revents: 0,
-    }
-}
-
-unsafe extern "C" {
-    #[link_name = "poll"]
-    fn libc_poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
 }
 
 #[cfg(test)]
