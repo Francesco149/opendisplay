@@ -57,6 +57,24 @@ pub fn dir() -> PathBuf {
         .join("opendisplay")
 }
 
+/// Every output lock name in [`dir`], held or not (lock files outlive their
+/// locks).
+#[cfg_attr(not(feature = "kde"), allow(dead_code))] // only KDE's clean asks yet
+pub fn names() -> Result<Vec<String>> {
+    let Ok(entries) = std::fs::read_dir(dir()) else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension()? == "lock").then(|| p.file_stem()?.to_str().map(String::from))?
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 /// Take the lock for output `name`, or fail with [`LockHeld`] when a
 /// running sender holds it.
 pub fn lock_output(name: &str) -> Result<OutputLock> {
@@ -118,6 +136,10 @@ mod tests {
         assert!(try_lock(&name).unwrap().is_none());
         drop(first);
         drop(lock_output(&name).expect("lock is free again once the holder closes"));
+        assert!(
+            super::names().unwrap().contains(&name),
+            "lock files are listed"
+        );
         let _ = std::fs::remove_file(super::dir().join(format!("{name}.lock")));
     }
 }

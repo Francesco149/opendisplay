@@ -13,6 +13,10 @@ pacman -Syu --noconfirm --needed \
 getcap /usr/bin/kwin_wayland || true
 install -m755 /usr/bin/kwin_wayland /usr/local/bin/kwin_wayland
 useradd --create-home tester
+# Hand the checkout back afterwards: the runner's post-job cleanup has to
+# write .git/config again.
+owner="$(stat -c %u:%g /src)"
+trap 'chown -R "$owner" /src /logs' EXIT
 chown -R tester: /src /logs
 # The render node (vgem on hosted runners) belongs to the host's groups.
 chmod a+rw /dev/dri/* || true
