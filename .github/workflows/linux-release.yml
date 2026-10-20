@@ -65,13 +65,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # linux-v0.1.0-beta.1 must belong to crate version 0.1.0, so
+      # linux-v0.1.0-beta.1 must belong to crate version 0.1.0, and
       # `od-sender --version` names the release it came from.
       - name: Version
         run: |
           crate="$(cargo pkgid -p od-sender | sed 's/.*[#@]//')"
           if [ "$GITHUB_REF_TYPE" != tag ]; then
             echo "VERSION=${crate}-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            echo "OD_SENDER_VERSION=${crate}-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
             exit 0
           fi
           ver="${TAG#linux-v}"
@@ -80,6 +81,8 @@ jobs:
             exit 1
           fi
           echo "VERSION=$ver" >> "$GITHUB_ENV"
+          # Read by build.rs: `od-sender --version` and `doctor` print it.
+          echo "OD_SENDER_VERSION=$ver" >> "$GITHUB_ENV"
 
       - name: Cache static FFmpeg
         id: ffmpeg-cache
@@ -122,7 +125,8 @@ jobs:
       - name: Smoke test
         run: |
           bin=target/release/od-sender
-          "$bin" --version
+          [ "$("$bin" --version)" = "od-sender $VERSION" ] || {
+            echo "::error::--version says '$("$bin" --version)', want od-sender $VERSION"; exit 1; }
           for enc in x264 openh264 auto; do
             "$bin" dev encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
           done

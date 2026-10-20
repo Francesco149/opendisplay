@@ -26,7 +26,7 @@ fn wlroots_report() {
 
 /// Prints the report; returns `false` on an unsupported desktop.
 pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
-    println!("od-sender {}", env!("CARGO_PKG_VERSION"));
+    println!("od-sender {}", env!("OD_SENDER_VERSION"));
     let config_ok = config_report(config_path);
     let env = Environment::from_process();
 
