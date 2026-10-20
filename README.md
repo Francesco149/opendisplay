@@ -277,8 +277,9 @@ The capture/streaming pipeline itself uses only public APIs.
 ## Linux sender (beta)
 
 `od-sender` extends a Linux desktop onto any OpenDisplay receiver (iPhone,
-iPad, Android, or a spare Mac). The beta supports **Omarchy / Hyprland 0.55+**
-on aarch64 and x86_64; GNOME, KDE and Sway are coming.
+iPad, Android, or a spare Mac). The beta is tested on **Omarchy / Hyprland
+0.55+** (aarch64 and x86_64); **Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+**
+are experimental.
 
 ```sh
 yay -S opendisplay-sender

@@ -9,8 +9,9 @@ const APP_STORE_URL = "https://apps.apple.com/us/app/opendisplay/id6780264891"
 // opens for testers, so the site links the group and the tester opt-in page.
 const ANDROID_BETA_GROUP_URL = "https://groups.google.com/g/opendisplay"
 const ANDROID_BETA_TESTER_URL = "https://play.google.com/apps/testing/com.peetzweg.opendisplay"
-// The Linux sender (od-sender) is a beta for Omarchy / Hyprland, installed
-// from the AUR. Its docs live next to the code in linux/README.md.
+// The Linux sender (od-sender) is a beta (Hyprland tested; Sway, KDE Plasma
+// and GNOME experimental), installed from the AUR. Its docs live next to the
+// code in linux/README.md.
 const LINUX_README_URL = "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md"
 const RELEASES_URL = "https://github.com/peetzweg/opendisplay/releases"
 
@@ -198,7 +199,7 @@ export default function App() {
             Use your iPhone and iPad as a second — and even a third — screen for your Mac.
             A true extended display, not a mirror: USB or WiFi, Retina-sharp, with touch and
             scroll. No subscription. No dongle. No account. Android phones and tablets are
-            in public beta, over WiFi, and so is a sender for Linux desktops on Hyprland.
+            in public beta, over WiFi, and so is a sender for Linux desktops.
           </p>
           <p className="meta">macOS 14+ &nbsp;·&nbsp; iPadOS 15+ &nbsp;·&nbsp; iOS 15+ &nbsp;·&nbsp; Android 7.0+ (beta) &nbsp;·&nbsp; Receiver Mac 12+ &nbsp;·&nbsp; Linux sender (beta) &nbsp;·&nbsp; GPL-3.0</p>
         </div>
@@ -237,7 +238,7 @@ export default function App() {
               </div>
               <div className="download-option">
                 <div className="platform">Linux <span className="beta-tag">Beta</span></div>
-                <p className="dl-sub">Extends a Hyprland desktop onto your devices.</p>
+                <p className="dl-sub">Extends a Linux desktop onto your devices.</p>
                 <a className="btn primary" href={LINUX_README_URL}>
                   Get started
                 </a>
@@ -245,7 +246,7 @@ export default function App() {
                   From the AUR: <code>yay -S opendisplay-sender</code>
                 </p>
                 <p className="note">
-                  Omarchy / Hyprland&nbsp;0.55+ · aarch64 and x86_64. GNOME, KDE and Sway are coming.
+                  Hyprland&nbsp;0.55+ tested · Sway&nbsp;1.10+, KDE&nbsp;Plasma&nbsp;6.8+, GNOME&nbsp;50+ experimental · aarch64 and x86_64.
                 </p>
                 <p className="note">
                   <a href={LINUX_README_URL}>Setup &amp; known issues ↗</a> ·{" "}
