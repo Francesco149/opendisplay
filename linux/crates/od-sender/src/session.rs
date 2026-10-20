@@ -1070,6 +1070,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                     vec![]
                 }
             };
+            let mut apply_now: Option<(Target, String)> = None;
             for a in actions {
                 match a {
                     SenderAction::Send(bytes) => stream.write_all(&bytes).await.context("write")?,
@@ -1108,11 +1109,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             return Ok(SessionEnd::LockConflict { held, receiver: receiver_label(&h) });
                         }
                         // The first plan applies at once; re-sent hellos settle first (§6.1).
+                        // At once means after this batch: `welcome` (and any
+                        // `updateRequired`) go out before the streamConfig.
                         if let Some(t) = debounce.on_hello(t, Instant::now()) {
-                            let cur = cursor_for(&ropts, backend, &sess);
-                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
-                                return conflict_or(e, receiver_label(&h));
-                            }
+                            apply_now = Some((t, receiver_label(&h)));
                         }
                     }
                     SenderAction::RequestKeyframe => {
@@ -1150,6 +1150,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
             }
             if !sess.is_connected() {
                 return Ok(SessionEnd::Ended);
+            }
+            if let Some((t, receiver)) = apply_now {
+                let cur = cursor_for(&ropts, backend, &sess);
+                if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
+                    return conflict_or(e, receiver);
+                }
             }
         }
     }
@@ -1524,6 +1530,19 @@ mod tests {
         let (log, _, end) = drive(hello, losses, fail_reconfigure).await;
         forget_lock(&name);
         (log, end, name)
+    }
+
+    /// §9's sequence: `welcome` answers the first `hello` before the display
+    /// is built and its streamConfig sent.
+    #[tokio::test]
+    async fn welcome_goes_out_before_the_first_stream_config() {
+        let (hello, name) = test_hello("wf");
+        let (_, seen, _) = drive(hello, 0, false).await;
+        forget_lock(&name);
+        let at = |f: fn(&ReceiverAction) -> bool| seen.iter().position(f).expect("present");
+        let welcome = at(|a| matches!(a, ReceiverAction::Welcome(_)));
+        let config = at(|a| matches!(a, ReceiverAction::StreamConfig(_)));
+        assert!(welcome < config, "{seen:?}");
     }
 
     #[tokio::test]
