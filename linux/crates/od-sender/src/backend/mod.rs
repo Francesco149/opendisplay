@@ -152,6 +152,10 @@ pub trait Backend: Send {
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>>;
     /// Remove `od-*` outputs that no running sender holds a lock on.
     fn clean(&mut self) -> Result<Vec<String>>;
+    /// The output lock [`open`](Self::open) takes for `spec`.
+    fn lock_name(&self, spec: &DisplaySpec) -> String {
+        spec.name.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

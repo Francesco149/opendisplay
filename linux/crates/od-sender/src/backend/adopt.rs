@@ -101,4 +101,8 @@ impl Backend for AdoptBackend {
     fn clean(&mut self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    fn lock_name(&self, _: &DisplaySpec) -> String {
+        self.output.clone()
+    }
 }

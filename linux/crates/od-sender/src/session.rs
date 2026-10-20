@@ -18,6 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
+use crate::backend::lock::{self, LockHeld};
 use crate::backend::{
     Backend, CaptureEvent, CaptureOptions, DisplayInfo, DisplaySpec, Frame, FrameSink, InputSink,
     Position, VirtualDisplay,
@@ -41,6 +42,11 @@ pub struct RunOptions {
     pub keep_output: bool,
     pub reconnect: bool,
     pub duration: Option<Duration>,
+    /// The receiver's id when discovery told us, so a lock conflict is found
+    /// before dialing (the receiver hands itself to whoever connects last).
+    pub receiver_id: Option<String>,
+    /// How the receiver is named in messages before its `hello` arrives.
+    pub receiver_name: String,
 }
 
 fn now(start: Instant) -> Now {
@@ -51,12 +57,13 @@ fn now(start: Instant) -> Now {
     Now::new(start.elapsed(), wall_ms)
 }
 
-fn short_id(hello: &Hello) -> String {
-    hello
-        .id
-        .as_deref()
+/// The output for a receiver with this `hello.id` (equal to its Bonjour TXT
+/// `id`, PROTOCOL §2.1): `od-<first 6 chars>`; also the lock key.
+pub fn output_name(id: Option<&str>) -> String {
+    let short = id
         .map(|s| s.chars().take(6).collect::<String>().to_lowercase())
-        .unwrap_or_else(|| "anon".into())
+        .unwrap_or_else(|| "anon".into());
+    format!("od-{short}")
 }
 
 /// What a `hello` asks the backend for: the desktop plan plus where and
@@ -71,7 +78,7 @@ pub fn target(hello: &Hello, opts: &RunOptions) -> Result<Target, PlanError> {
     let plan = desktop::plan(hello, &opts.desktop)?;
     Ok(Target {
         spec: DisplaySpec {
-            name: format!("od-{}", short_id(hello)),
+            name: output_name(hello.id.as_deref()),
             width: plan.output.width,
             height: plan.output.height,
             hz: plan.output.hz,
@@ -373,8 +380,11 @@ fn shutdown_signal() -> Result<watch::Receiver<bool>> {
 }
 
 /// How a session ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEnd {
+    /// Another sender drives this receiver's output: stop, do not redial
+    /// (each redial would take the receiver from the other sender).
+    LockConflict { held: LockHeld, receiver: String },
     /// Connection dropped or shutdown; redial if allowed.
     Ended,
     /// The receiver said `closing`: do not redial.
@@ -383,6 +393,107 @@ pub enum SessionEnd {
     DisplayLost,
     /// No stream this sender can produce suits the receiver: stop.
     Incompatible,
+}
+
+/// Redial delay: doubles from `min` to `max` while sessions keep failing;
+/// back to `min` after a session that lasted `healthy`.
+pub struct Backoff {
+    min: Duration,
+    max: Duration,
+    healthy: Duration,
+    next: Duration,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self::new(
+            Duration::from_millis(500),
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+    }
+}
+
+impl Backoff {
+    pub fn new(min: Duration, max: Duration, healthy: Duration) -> Self {
+        Self {
+            min,
+            max,
+            healthy,
+            next: min,
+        }
+    }
+
+    /// The delay before the next dial. `lasted` is how long the session
+    /// that just ended ran (`None` when the dial itself failed).
+    pub fn delay(&mut self, lasted: Option<Duration>) -> Duration {
+        if lasted.is_some_and(|l| l >= self.healthy) {
+            self.next = self.min;
+        }
+        let d = self.next;
+        self.next = (self.next * 2).min(self.max);
+        d
+    }
+}
+
+/// How a receiver is named in messages: device and id from its `hello`.
+fn receiver_label(h: &Hello) -> String {
+    match (&h.device, &h.id) {
+        (Some(d), Some(id)) => format!("{d} ({id})"),
+        (Some(d), None) => d.clone(),
+        (None, Some(id)) => id.clone(),
+        (None, None) => "this receiver".into(),
+    }
+}
+
+/// `Some` when the lock `spec` needs is held by another process. Our own
+/// display holding it (a rebuild for the same receiver) is no conflict.
+fn lock_conflict(
+    backend: &dyn Backend,
+    active: Option<&Active>,
+    spec: &DisplaySpec,
+) -> Result<Option<LockHeld>> {
+    let name = backend.lock_name(spec);
+    if active.is_some_and(|a| backend.lock_name(&a.target.spec) == name) {
+        return Ok(None);
+    }
+    Ok(match lock::try_lock(&name)? {
+        Some(_probe) => None,
+        None => Some(LockHeld {
+            pid: lock::holder_pid(&name),
+            name,
+        }),
+    })
+}
+
+/// Before dialing: `Some` when the output for receiver `id` is already
+/// driven by another sender.
+fn pre_dial_conflict(
+    backend: &dyn Backend,
+    id: &str,
+    position: Position,
+) -> Result<Option<LockHeld>> {
+    let spec = DisplaySpec {
+        name: output_name(Some(id)),
+        width: 0,
+        height: 0,
+        hz: 0,
+        scale: 1.0,
+        position,
+    };
+    lock_conflict(backend, None, &spec)
+}
+
+/// A lock conflict surfacing from `open` (a sender that started between our
+/// check and our open) ends the session like the check would have.
+fn conflict_or(e: anyhow::Error, receiver: String) -> Result<SessionEnd> {
+    match e.downcast_ref::<LockHeld>() {
+        Some(held) => Ok(SessionEnd::LockConflict {
+            held: held.clone(),
+            receiver,
+        }),
+        None => Err(e),
+    }
 }
 
 pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) -> Result<()> {
@@ -395,7 +506,14 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
     );
     let mut shutdown = shutdown_signal()?;
     let mut losses = LossBudget::default();
+    let mut backoff = Backoff::default();
+    if let Some(id) = &opts.receiver_id {
+        if let Some(held) = pre_dial_conflict(backend, id, opts.position)? {
+            anyhow::bail!("{held} for {}; stop it first", opts.receiver_name);
+        }
+    }
     loop {
+        let mut lasted = None;
         if *shutdown.borrow() || opts.duration.is_some_and(|d| start.elapsed() >= d) {
             break;
         }
@@ -407,7 +525,14 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
                 info!("connected to receiver {addr}");
-                match session(stream, backend, &opts, start, shutdown.clone(), &mut losses).await {
+                let began = Instant::now();
+                let end =
+                    session(stream, backend, &opts, start, shutdown.clone(), &mut losses).await;
+                lasted = Some(began.elapsed());
+                match end {
+                    Ok(SessionEnd::LockConflict { held, receiver }) => {
+                        anyhow::bail!("{held} for {receiver}; stop it first");
+                    }
                     Ok(SessionEnd::ReceiverClosed) => {
                         info!("receiver closed the session for good");
                         break;
@@ -429,8 +554,10 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
         if !opts.reconnect || *shutdown.borrow() {
             break;
         }
+        let delay = backoff.delay(lasted);
+        debug!("redialing in {delay:?}");
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = tokio::time::sleep(delay) => {}
             _ = shutdown.changed() => break,
         }
     }
@@ -556,7 +683,9 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 },
                 _ = sleep_until_opt(debounce.deadline()) => {
                     if let Some(t) = debounce.poll(Instant::now()) {
-                        apply(&mut stream, &sess, backend, &mut active, t, opts).await?;
+                        if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, opts).await {
+                            return conflict_or(e, sess.hello().map_or_else(|| "this receiver".into(), receiver_label));
+                        }
                     }
                     vec![]
                 }
@@ -593,9 +722,16 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                                 return Ok(SessionEnd::Incompatible);
                             }
                         };
+                        // Before `welcome` (it follows `Hello` in this batch):
+                        // a receiver another sender drives is left alone.
+                        if let Some(held) = lock_conflict(backend, active.as_ref(), &t.spec)? {
+                            return Ok(SessionEnd::LockConflict { held, receiver: receiver_label(&h) });
+                        }
                         // The first plan applies at once; re-sent hellos settle first (§6.1).
                         if let Some(t) = debounce.on_hello(t, Instant::now()) {
-                            apply(&mut stream, &sess, backend, &mut active, t, opts).await?;
+                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, opts).await {
+                                return conflict_or(e, receiver_label(&h));
+                            }
                         }
                     }
                     SenderAction::RequestKeyframe => {
@@ -666,6 +802,8 @@ mod tests {
             keep_output: false,
             reconnect: false,
             duration: None,
+            receiver_id: None,
+            receiver_name: "test".into(),
         }
     }
 
@@ -818,11 +956,34 @@ mod tests {
         }
     }
 
+    /// A receiver `hello` whose output name is unique to `tag` and this
+    /// process, because sessions probe the real lock directory and tests run
+    /// in parallel. Returns the hello and the output name.
+    fn test_hello(tag: &str) -> (Hello, String) {
+        let id = format!("{tag}{:06x}-test", std::process::id());
+        let name = format!("od-{}", &id[..6]);
+        (
+            Hello {
+                id: Some(id),
+                ..hello()
+            },
+            name,
+        )
+    }
+
+    fn forget_lock(name: &str) {
+        let _ = std::fs::remove_file(lock::dir().join(format!("{name}.lock")));
+    }
+
     /// Drive one session against a `ReceiverSession` over an in-memory pipe.
     /// After each `streamConfig`, capture ends like an output removed under
     /// it, `losses` times; then the receiver hangs up. Returns the backend
-    /// log and how the session ended.
-    async fn lose_display(losses: usize, fail_reconfigure: bool) -> (Vec<String>, SessionEnd) {
+    /// log, the receiver's actions and how the session ended.
+    async fn drive(
+        hello: Hello,
+        losses: usize,
+        fail_reconfigure: bool,
+    ) -> (Vec<String>, Vec<ReceiverAction>, SessionEnd) {
         let shared = Shared::default();
         shared
             .fail_reconfigure
@@ -843,13 +1004,14 @@ mod tests {
             .await
         });
 
-        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello()));
+        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello));
         let rx_now = || Now::new(Duration::from_secs(1), 1e6);
         for a in rx.handle(rx_now(), ReceiverEvent::Connected) {
             if let ReceiverAction::Send(b) = a {
                 receiver_io.write_all(&b).await.unwrap();
             }
         }
+        let mut seen = Vec::new();
         let mut buf = vec![0u8; 1 << 16];
         let mut lost = 0;
         loop {
@@ -861,13 +1023,15 @@ mod tests {
                 break;
             }
             for a in rx.handle(rx_now(), ReceiverEvent::Bytes(&buf[..n])) {
-                if !matches!(a, ReceiverAction::StreamConfig(_)) {
+                let config = matches!(a, ReceiverAction::StreamConfig(_));
+                seen.push(a);
+                if !config {
                     continue;
                 }
                 if lost == losses {
                     drop(receiver_io);
                     let end = session_task.await.unwrap().unwrap();
-                    return (shared.entries(), end);
+                    return (shared.entries(), seen, end);
                 }
                 lost += 1;
                 let mut sink = shared.sink.lock().unwrap().take().expect("capturing");
@@ -875,17 +1039,28 @@ mod tests {
             }
         }
         let end = session_task.await.unwrap().unwrap();
-        (shared.entries(), end)
+        (shared.entries(), seen, end)
+    }
+
+    async fn lose_display(
+        tag: &str,
+        losses: usize,
+        fail_reconfigure: bool,
+    ) -> (Vec<String>, SessionEnd, String) {
+        let (hello, name) = test_hello(tag);
+        let (log, _, end) = drive(hello, losses, fail_reconfigure).await;
+        forget_lock(&name);
+        (log, end, name)
     }
 
     #[tokio::test]
     async fn a_lost_display_is_recreated_from_the_last_plan() {
-        let (log, end) = lose_display(1, false).await;
+        let (log, end, name) = lose_display("la", 1, false).await;
         assert_eq!(end, SessionEnd::Ended);
         assert_eq!(
             log,
             [
-                "open od-3f9a1c",
+                format!("open {name}").as_str(),
                 "start_capture",
                 "reconfigure",
                 "start_capture",
@@ -897,7 +1072,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_display_lost_too_often_ends_the_run() {
-        let (log, end) = lose_display(4, false).await;
+        let (log, end, _) = lose_display("lb", 4, false).await;
         assert_eq!(end, SessionEnd::DisplayLost);
         assert_eq!(log.iter().filter(|l| *l == "reconfigure").count(), 3);
         assert_eq!(log.last().unwrap(), "close keep=false");
@@ -905,8 +1080,81 @@ mod tests {
 
     #[tokio::test]
     async fn a_display_that_cannot_be_recreated_ends_the_run() {
-        let (log, end) = lose_display(1, true).await;
+        let (log, end, name) = lose_display("lc", 1, true).await;
         assert_eq!(end, SessionEnd::DisplayLost);
-        assert_eq!(log, ["open od-3f9a1c", "start_capture", "reconfigure"]);
+        assert_eq!(
+            log,
+            [
+                format!("open {name}").as_str(),
+                "start_capture",
+                "reconfigure"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_receiver_another_sender_drives_is_left_before_welcome() {
+        let (hello, name) = test_hello("lk");
+        // The other sender; within one process a second open file is a
+        // second lock holder, as another process would be.
+        let other = lock::lock_output(&name).unwrap();
+        let (log, seen, end) = drive(hello, 0, false).await;
+        drop(other);
+        forget_lock(&name);
+        match end {
+            SessionEnd::LockConflict { held, receiver } => {
+                assert_eq!(held.name, name);
+                assert_eq!(held.pid, Some(std::process::id()));
+                assert!(receiver.starts_with("iPhone ("), "{receiver}");
+            }
+            e => panic!("expected a lock conflict, got {e:?}"),
+        }
+        assert!(log.is_empty(), "nothing opened: {log:?}");
+        assert!(
+            !seen.iter().any(|a| matches!(a, ReceiverAction::Welcome(_))),
+            "welcome must not be sent: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_held_receiver_is_found_before_dialing() {
+        let (hello, name) = test_hello("pd");
+        let id = hello.id.unwrap();
+        let backend = FakeBackend(Shared::default());
+        assert_eq!(
+            pre_dial_conflict(&backend, &id, Position::AutoRight).unwrap(),
+            None
+        );
+        let other = lock::lock_output(&name).unwrap();
+        let held = pre_dial_conflict(&backend, &id, Position::AutoRight)
+            .unwrap()
+            .expect("conflict");
+        assert_eq!(held.name, name);
+        drop(other);
+        forget_lock(&name);
+    }
+
+    #[test]
+    fn backoff_doubles_to_the_cap_and_resets_after_a_healthy_session() {
+        let ms = Duration::from_millis;
+        let mut b = Backoff::default();
+        let delays: Vec<_> = (0..7).map(|_| b.delay(None)).collect();
+        assert_eq!(
+            delays,
+            [
+                ms(500),
+                ms(1000),
+                ms(2000),
+                ms(4000),
+                ms(8000),
+                ms(10_000),
+                ms(10_000)
+            ]
+        );
+        // A short session keeps backing off.
+        assert_eq!(b.delay(Some(Duration::from_secs(5))), ms(10_000));
+        // One that ran long enough starts over.
+        assert_eq!(b.delay(Some(Duration::from_secs(31))), ms(500));
+        assert_eq!(b.delay(None), ms(1000));
     }
 }

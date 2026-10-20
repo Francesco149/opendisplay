@@ -124,25 +124,41 @@ enum Cmd {
     },
 }
 
+/// A receiver to dial; `id` and the Bonjour name only when discovered.
+struct Receiver {
+    addr: SocketAddr,
+    id: Option<String>,
+    name: String,
+}
+
 /// Resolve `--to` (or the legacy `--connect`/`--name`) to an address.
 fn resolve_receiver(
     to: Option<String>,
     connect: Option<SocketAddr>,
     name: Option<String>,
-) -> Result<SocketAddr> {
+) -> Result<Receiver> {
+    let direct = |addr: SocketAddr| Receiver {
+        addr,
+        id: None,
+        name: addr.to_string(),
+    };
     if let Some(a) = connect {
-        return Ok(a);
+        return Ok(direct(a));
     }
     let to = to.or(name);
     if let Some(a) = to.as_deref().and_then(|t| t.parse::<SocketAddr>().ok()) {
-        return Ok(a);
+        return Ok(direct(a));
     }
     let found = discover::find(to.as_deref(), Duration::from_secs(10))?;
     info!(
         "discovered {} at {} (pv {}, id {:?})",
         found.instance, found.addr, found.pv, found.id
     );
-    Ok(found.addr)
+    Ok(Receiver {
+        addr: found.addr,
+        id: found.id,
+        name: found.instance,
+    })
 }
 
 fn main() {
@@ -196,9 +212,9 @@ fn real_main() -> Result<i32> {
             let mut backend = detect::detect(&backend.request())?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                let addr = resolve_receiver(to, connect, name)?;
+                let receiver = resolve_receiver(to, connect, name)?;
                 session::run(
-                    addr,
+                    receiver.addr,
                     backend.as_mut(),
                     session::RunOptions {
                         bitrate_mbps,
@@ -210,6 +226,8 @@ fn real_main() -> Result<i32> {
                         keep_output,
                         reconnect: !no_reconnect,
                         duration: duration.map(Duration::from_secs_f64),
+                        receiver_id: receiver.id,
+                        receiver_name: receiver.name,
                     },
                 )
                 .await

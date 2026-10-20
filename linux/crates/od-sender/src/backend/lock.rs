@@ -14,6 +14,42 @@ pub struct OutputLock {
     _file: File,
 }
 
+/// Another process holds the lock for `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockHeld {
+    pub name: String,
+    /// The holder's pid, as it wrote it into the lock file.
+    pub pid: Option<u32>,
+}
+
+impl std::fmt::Display for LockHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.pid {
+            Some(pid) => write!(
+                f,
+                "another od-sender (pid {pid}) is already driving {}",
+                self.name
+            ),
+            None => write!(f, "another od-sender is already driving {}", self.name),
+        }
+    }
+}
+
+impl std::error::Error for LockHeld {}
+
+fn path(name: &str) -> PathBuf {
+    dir().join(format!("{name}.lock"))
+}
+
+/// The pid recorded in `name`'s lock file, if any.
+pub fn holder_pid(name: &str) -> Option<u32> {
+    std::fs::read_to_string(path(name))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 pub fn dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -21,15 +57,16 @@ pub fn dir() -> PathBuf {
         .join("opendisplay")
 }
 
-/// Take the lock for output `name`, or fail with "already driving" when a
+/// Take the lock for output `name`, or fail with [`LockHeld`] when a
 /// running sender holds it.
 pub fn lock_output(name: &str) -> Result<OutputLock> {
     match try_lock(name)? {
         Some(l) => Ok(l),
-        None => anyhow::bail!(
-            "another od-sender is already driving {name} ({})",
-            dir().join(format!("{name}.lock")).display()
-        ),
+        None => Err(LockHeld {
+            name: name.to_string(),
+            pid: holder_pid(name),
+        }
+        .into()),
     }
 }
 
@@ -37,7 +74,7 @@ pub fn lock_output(name: &str) -> Result<OutputLock> {
 pub fn try_lock(name: &str) -> Result<Option<OutputLock>> {
     let dir = dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join(format!("{name}.lock"));
+    let path = path(name);
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -49,6 +86,10 @@ pub fn try_lock(name: &str) -> Result<Option<OutputLock>> {
     const LOCK_NB: i32 = 4;
     // SAFETY: flock on a descriptor we own for the duration of the call.
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+        // Record the holder for the "already driving" message; best effort.
+        use std::io::Write;
+        let _ = file.set_len(0);
+        let _ = (&file).write_all(format!("{}\n", std::process::id()).as_bytes());
         return Ok(Some(OutputLock { _file: file }));
     }
     let e = std::io::Error::last_os_error();
@@ -71,6 +112,8 @@ mod tests {
         let name = format!("od-test-{}", std::process::id());
         let first = lock_output(&name).expect("first lock");
         let err = lock_output(&name).expect_err("second lock must fail");
+        let held = err.downcast_ref::<super::LockHeld>().expect("typed error");
+        assert_eq!(held.pid, Some(std::process::id()));
         assert!(err.to_string().contains("already driving"), "{err:#}");
         assert!(try_lock(&name).unwrap().is_none());
         drop(first);
