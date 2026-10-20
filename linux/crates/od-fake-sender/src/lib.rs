@@ -79,6 +79,9 @@ pub struct Summary {
     pub keyframe_requests: u64,
     pub touches: u64,
     pub stats_received: u64,
+    /// `sleeping` / `closing` from the receiver (§6.1).
+    pub sleeping_received: u32,
+    pub closing_received: u32,
 }
 
 pub async fn run(opts: Options) -> Result<Summary> {
@@ -324,8 +327,14 @@ async fn apply(
                 summary.stats_received += 1;
                 info!("PHONE-STATS {v}");
             }
-            SenderAction::ReceiverSleeping => info!("receiver sleeping"),
-            SenderAction::ReceiverClosing => info!("receiver closing"),
+            SenderAction::ReceiverSleeping => {
+                summary.sleeping_received += 1;
+                info!("receiver sleeping");
+            }
+            SenderAction::ReceiverClosing => {
+                summary.closing_received += 1;
+                info!("receiver closing");
+            }
             SenderAction::Close(reason) => {
                 warn!("closing: {reason:?}");
                 return Ok(());

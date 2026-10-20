@@ -8,6 +8,7 @@ pub mod gtk_ui;
 pub mod id;
 pub mod input;
 pub mod outputs;
+pub mod power;
 pub mod stats;
 pub mod video;
 
@@ -54,6 +55,8 @@ pub struct Report {
     pub closes: u32,
     /// Touch/scroll messages sent from local input.
     pub input_events: u64,
+    /// Sleep notifications handled.
+    pub sleeps: u32,
     /// Frames that reached the sink (None when the backend cannot tell).
     pub rendered_frames: Option<u64>,
 }
@@ -65,6 +68,8 @@ pub struct Receiver {
     video: Box<dyn VideoOutput>,
     /// Pointer input from the window, sent to the sender as touch/scroll.
     input: Option<tokio::sync::mpsc::UnboundedReceiver<UserInput>>,
+    /// Sleep notifications (logind in the binary, a fake in tests).
+    power: Option<tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>>,
 }
 
 fn now(start: Instant) -> Now {
@@ -106,7 +111,17 @@ impl Receiver {
             udp,
             video,
             input: None,
+            power: None,
         })
+    }
+
+    /// Say `sleeping` and drop the sender when the machine goes to sleep.
+    pub fn with_power(
+        mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>,
+    ) -> Self {
+        self.power = Some(rx);
+        self
     }
 
     /// Forward local pointer input to the connected sender.
@@ -178,6 +193,25 @@ impl Receiver {
                         }
                         Ok(n) => sess.handle(now(start), ReceiverEvent::Bytes(&buf[..n])),
                     }
+                }
+                Some(power::PowerEvent::Sleeping { done }) = recv_power(&mut self.power) => {
+                    report.sleeps += 1;
+                    if let Some(s) = current.as_mut() {
+                        info!("going to sleep: telling the sender");
+                        // §6.1: best effort, right before closing; the sender
+                        // keeps listening for the wake and redials.
+                        if let ReceiverAction::Send(bytes) = sess.control(&ControlMessage::Sleeping) {
+                            let _ = s.write_all(&bytes).await;
+                            let _ = s.flush().await;
+                        }
+                        current = None;
+                        peer = None;
+                        sess.handle(now(start), ReceiverEvent::Disconnected);
+                    }
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                    continue;
                 }
                 Some(ev) = recv_input(&mut self.input) => {
                     if !sess.is_connected() {
@@ -338,6 +372,15 @@ impl Receiver {
 async fn read_current(current: &mut Option<TcpStream>, buf: &mut [u8]) -> std::io::Result<usize> {
     match current {
         Some(s) => s.read(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_power(
+    power: &mut Option<tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>>,
+) -> Option<power::PowerEvent> {
+    match power {
+        Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
 }

@@ -160,3 +160,55 @@ async fn decodes_with_fakesink_when_a_decoder_is_installed() {
         s.frames_sent
     );
 }
+
+/// `sleeping` before a suspend (logind in the binary, a fake here) and
+/// `closing` on shutdown both reach the sender, and sleeping drops it.
+#[tokio::test]
+async fn sleeping_and_closing_reach_the_sender() {
+    use od_receiver::power::PowerEvent;
+
+    let cfg = Config {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        hello: hello(),
+        cursor_udp: false,
+        stats_every: Duration::from_millis(500),
+    };
+    let (power_tx, power_rx) = tokio::sync::mpsc::unbounded_channel();
+    let rx = Receiver::bind(cfg, Box::new(NullOutput::default()))
+        .await
+        .unwrap()
+        .with_power(power_rx);
+    let addr = rx.local_addr().unwrap();
+    let (stop, stop_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(rx.run(stop_rx));
+
+    // Sleep while a sender streams: it hears `sleeping` and is dropped well
+    // before its 3 s run would end.
+    let sender = tokio::spawn(od_fake_sender::run(sender_opts(addr, 3.0)));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    power_tx
+        .send(PowerEvent::Sleeping {
+            done: Some(done_tx),
+        })
+        .unwrap();
+    let s1 = tokio::time::timeout(Duration::from_secs(2), sender)
+        .await
+        .expect("sender dropped promptly")
+        .unwrap()
+        .unwrap();
+    assert!(
+        done_rx.try_recv().is_ok(),
+        "the watcher hears sleeping went out"
+    );
+    assert_eq!(s1.sleeping_received, 1, "{s1:?}");
+
+    // A sender still connected at shutdown hears `closing`.
+    let sender = tokio::spawn(od_fake_sender::run(sender_opts(addr, 3.0)));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    stop.send(true).unwrap();
+    let report = task.await.unwrap().unwrap();
+    let s2 = sender.await.unwrap().unwrap();
+    assert_eq!(report.sleeps, 1, "{report:?}");
+    assert_eq!(s2.closing_received, 1, "{s2:?}");
+}

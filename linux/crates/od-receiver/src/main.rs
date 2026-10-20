@@ -152,7 +152,7 @@ fn wayland_guess(a: &Args) -> PanelGuess {
     };
     for o in &list {
         info!(
-            "output {}: {}x{} @{} scale {} ({})",
+            "output {}: {}x{} @{:?} Hz scale {} ({})",
             o.name,
             o.width,
             o.height,
@@ -166,7 +166,7 @@ fn wayland_guess(a: &Args) -> PanelGuess {
             pixels: Some((o.width as u32, o.height as u32)),
             scale: Some(o.scale.max(1) as f64),
             points: None,
-            refresh: Some(o.refresh_hz()),
+            refresh: o.refresh_hz(),
             output: Some(o.name.clone()),
         },
         Err(e) => {
@@ -227,6 +227,15 @@ async fn serve(
     result.map(|_| ())
 }
 
+/// Sleep notifications for the receiver: from logind when built with it.
+fn power_events() -> tokio::sync::mpsc::UnboundedReceiver<od_receiver::power::PowerEvent> {
+    #[allow(unused_variables)]
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(feature = "logind")]
+    od_receiver::power::watch_logind(tx);
+    rx
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -257,7 +266,9 @@ fn main() -> Result<()> {
         gl: false,
     })?;
     rt.block_on(async {
-        let receiver = Receiver::bind(config(&a, hello), video).await?;
+        let receiver = Receiver::bind(config(&a, hello), video)
+            .await?
+            .with_power(power_events());
         let (tx, rx) = watch::channel(false);
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
@@ -281,7 +292,7 @@ fn gtk_main(a: Args) -> Result<()> {
     let monitors = gtk_ui::monitors();
     for m in &monitors {
         info!(
-            "monitor {}: {}x{} logical, scale {}, {} Hz ({})",
+            "monitor {}: {}x{} logical, scale {}, {:?} Hz ({})",
             m.connector,
             m.logical.0,
             m.logical.1,
@@ -295,7 +306,7 @@ fn gtk_main(a: Args) -> Result<()> {
             pixels: Some(m.pixels()),
             scale: Some(m.scale),
             points: Some((m.logical.0.max(0) as u32, m.logical.1.max(0) as u32)),
-            refresh: Some(m.refresh_hz()),
+            refresh: m.refresh_hz(),
             output: Some(m.connector.clone()),
         },
         Err(e) => {
@@ -329,7 +340,8 @@ fn gtk_main(a: Args) -> Result<()> {
     // Bound here so a busy port fails before any window appears.
     let receiver = rt
         .block_on(Receiver::bind(config(&a, hello), video))?
-        .with_input(input_rx);
+        .with_input(input_rx)
+        .with_power(power_events());
     let (tx, rx) = watch::channel(false);
     let tx = Arc::new(tx);
     let options = WindowOptions {
