@@ -165,6 +165,20 @@ jobs:
             timeout 180 linux/testbench/receiver-smoke.sh /usr/bin/od-sender \
             "$GITHUB_WORKSPACE/linux/target/release/od-receiver" "$RUNNER_TEMP/receiver-smoke"
 
+      # The NixOS kiosk shape (PLAN.md M5): cage runs od-receiver as its only
+      # application; od-fake-sender streams into it.
+      - name: Receiver kiosk smoke (cage)
+        run: |
+          pacman -S --noconfirm --needed cage
+          sudo -u builder -H cargo build --locked --release \
+            --manifest-path linux/Cargo.toml -p od-fake-sender
+          install -d -o builder "$RUNNER_TEMP/cage-smoke"
+          sudo -u builder -H env LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin \
+            timeout 120 linux/testbench/cage-smoke.sh \
+            "$GITHUB_WORKSPACE/linux/target/release/od-receiver" \
+            "$GITHUB_WORKSPACE/linux/target/release/od-fake-sender" \
+            linux/testdata/clip-640x360-30.h264 "$RUNNER_TEMP/cage-smoke"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -172,6 +186,7 @@ jobs:
           path: |
             ${{ runner.temp }}/sway-smoke
             ${{ runner.temp }}/receiver-smoke
+            ${{ runner.temp }}/cage-smoke
           if-no-files-found: ignore
 
   # The KDE backend on a headless KWin (SENDER-PLAN §4.3 KWin row):
