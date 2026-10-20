@@ -9,7 +9,7 @@ pub mod workspace;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use self::display::HyprlandOutput;
 use self::ipc::HyprlandIpc;
@@ -101,8 +101,34 @@ impl Backend for HyprlandBackend {
             focused: monitors.iter().find(|m| m.focused).map(|m| m.name.clone()),
             cursor: ipc.cursor_pos().ok(),
         };
-        for step in workspace::plan(name, output, &before) {
-            ipc.dispatch(&step)?;
+        let steps = workspace::plan(name, output, &before);
+        for step in &steps {
+            debug!("workspace: dispatch {step}");
+            ipc.dispatch(step)?;
+        }
+        // Give focus a moment to settle, then make sure the user has it back:
+        // a late event (the workspace's creation, a pointer move) may refocus.
+        if let Some(prev) = before
+            .focused
+            .as_deref()
+            .filter(|p| *p != output && !steps.is_empty())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = ipc
+                .monitors()?
+                .into_iter()
+                .find(|m| m.focused)
+                .map(|m| m.name);
+            if now.as_deref() != Some(prev) {
+                warn!(
+                    "workspace: focus is on {} after placing {name}; focusing {prev} again",
+                    now.as_deref().unwrap_or("nothing")
+                );
+                for step in workspace::restore(prev, before.cursor) {
+                    debug!("workspace: dispatch {step}");
+                    ipc.dispatch(&step)?;
+                }
+            }
         }
         Ok(())
     }

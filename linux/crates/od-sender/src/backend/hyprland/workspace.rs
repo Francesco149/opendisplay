@@ -58,10 +58,19 @@ pub fn plan(workspace: &str, output: &str, before: &Before) -> Vec<String> {
     steps.push(format!("hl.dsp.focus({{ monitor = {out} }})"));
     steps.push(format!("hl.dsp.focus({{ workspace = {ws} }})"));
     if let Some(prev) = before.focused.as_deref().filter(|p| *p != output) {
-        steps.push(format!("hl.dsp.focus({{ monitor = {} }})", lua_str(prev)));
-        if let Some((x, y)) = before.cursor {
-            steps.push(format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"));
-        }
+        steps.extend(restore(prev, before.cursor));
+    }
+    steps
+}
+
+/// Focus and pointer back to the user's monitor.
+pub fn restore(focused: &str, cursor: Option<(f64, f64)>) -> Vec<String> {
+    let mut steps = vec![format!(
+        "hl.dsp.focus({{ monitor = {} }})",
+        lua_str(focused)
+    )];
+    if let Some((x, y)) = cursor {
+        steps.push(format!("hl.dsp.cursor.move({{ x = {x}, y = {y} }})"));
     }
     steps
 }

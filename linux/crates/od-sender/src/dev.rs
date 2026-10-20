@@ -745,7 +745,10 @@ fn smoke(
         position,
     };
     let mut vd = backend.open(&spec)?;
-    if let Some(ws) = &workspace {
+    // With --workspace the smoke checks the placement leaves the user's focus
+    // and pointer alone, so it injects no pointer motion (which would move
+    // focus onto the output by itself) and needs just the first frame.
+    let frames = if let Some(ws) = &workspace {
         let output = vd.info().name.clone();
         if backend.supports_workspaces() {
             backend.show_workspace(&output, ws)?;
@@ -753,7 +756,11 @@ fn smoke(
         } else {
             info!("smoke: workspaces are not supported on {}", backend.id());
         }
-    }
+        1
+    } else {
+        frames
+    };
+    let move_pointer = workspace.is_none();
     info!("smoke: display {}", vd.info());
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<CaptureEvent>(2);
@@ -774,14 +781,16 @@ fn smoke(
                 bail!("only {captured}/{frames} frames within {timeout:?}");
             }
             // The cursor is painted into the frames, so motion is damage.
-            step += 1;
-            let t = step as f64 * 0.05;
-            input.touch(&Touch {
-                phase: TouchPhase::Moved,
-                x: 0.5 + 0.3 * t.cos(),
-                y: 0.5 + 0.3 * t.sin(),
-                t: None,
-            });
+            if move_pointer {
+                step += 1;
+                let t = step as f64 * 0.05;
+                input.touch(&Touch {
+                    phase: TouchPhase::Moved,
+                    x: 0.5 + 0.3 * t.cos(),
+                    y: 0.5 + 0.3 * t.sin(),
+                    t: None,
+                });
+            }
             match rx.recv_timeout(Duration::from_millis(30)) {
                 Ok(CaptureEvent::Frame(f)) => {
                     captured += 1;
@@ -805,7 +814,9 @@ fn smoke(
                 Err(_) => {}
             }
         }
-        input.scroll(&Scroll { dx: 0.0, dy: 40.0 });
+        if move_pointer {
+            input.scroll(&Scroll { dx: 0.0, dy: 40.0 });
+        }
         Ok(())
     })();
     drop(input);
