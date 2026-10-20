@@ -2,6 +2,7 @@
 //! driven through the shared `wayland/*` protocols.
 
 pub mod display;
+pub mod events;
 pub mod instance;
 pub mod ipc;
 pub mod workspace;

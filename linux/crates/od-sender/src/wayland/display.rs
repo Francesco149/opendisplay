@@ -24,6 +24,12 @@ pub trait OutputControl: Send + 'static {
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
     /// Remove the output (a no-op for outputs the sender did not create).
     fn remove(&mut self) -> Result<()>;
+    /// `Some(why)` when the compositor changed the output away from what
+    /// [`reconfigure`](Self::reconfigure) set (a config reload, a rule), so
+    /// the session should apply its spec again. Called often: keep it cheap.
+    fn drifted(&mut self) -> Option<String> {
+        None
+    }
     /// The units this compositor's cursor session reports in for the
     /// output; the protocol's (pixels) unless the backend knows better.
     fn cursor_space(&self) -> CursorSpace {
@@ -140,6 +146,10 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()> {
         self.stop_capture();
         self.output.reconfigure(spec)
+    }
+
+    fn drifted(&mut self) -> Option<String> {
+        self.output.drifted()
     }
 
     fn input(&mut self) -> Result<Box<dyn InputSink>> {

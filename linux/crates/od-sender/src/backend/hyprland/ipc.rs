@@ -107,6 +107,11 @@ impl HyprlandIpc {
         Self { socket }
     }
 
+    /// The event socket next to the request socket.
+    pub fn event_socket(&self) -> PathBuf {
+        self.socket.with_file_name(".socket2.sock")
+    }
+
     pub fn from_env() -> Result<Self> {
         let sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
             .context("HYPRLAND_INSTANCE_SIGNATURE not set: not inside Hyprland?")?;
