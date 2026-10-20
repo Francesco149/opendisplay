@@ -141,6 +141,13 @@ pub enum Dev {
         /// Where the output goes.
         #[arg(long, default_value = "auto-right")]
         position: Position,
+        /// Show this workspace on the output (Hyprland, Sway), then hold the
+        /// output for --hold seconds so the result can be inspected.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Keep the output this long after capturing, in seconds.
+        #[arg(long, default_value_t = 0.0)]
+        hold: f64,
         #[command(flatten)]
         backend: crate::BackendArgs,
     },
@@ -257,11 +264,14 @@ pub fn run(cmd: Dev) -> Result<()> {
             timeout,
             scale,
             position,
+            workspace,
+            hold,
             backend,
         } => smoke(
             &backend.request(),
             &size,
             (scale, position),
+            (workspace, Duration::from_secs_f64(hold)),
             frames,
             Duration::from_secs_f64(timeout),
         ),
@@ -719,6 +729,7 @@ fn smoke(
     req: &detect::Request,
     size: &str,
     (scale, position): (f64, Position),
+    (workspace, hold): (Option<String>, Duration),
     frames: u32,
     timeout: Duration,
 ) -> Result<()> {
@@ -734,6 +745,15 @@ fn smoke(
         position,
     };
     let mut vd = backend.open(&spec)?;
+    if let Some(ws) = &workspace {
+        let output = vd.info().name.clone();
+        if backend.supports_workspaces() {
+            backend.show_workspace(&output, ws)?;
+            info!("smoke: workspace {ws} shown on {output}");
+        } else {
+            info!("smoke: workspaces are not supported on {}", backend.id());
+        }
+    }
     info!("smoke: display {}", vd.info());
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<CaptureEvent>(2);
@@ -789,6 +809,10 @@ fn smoke(
         Ok(())
     })();
     drop(input);
+    if !hold.is_zero() {
+        info!("smoke: holding {} for {hold:?}", vd.info().name);
+        std::thread::sleep(hold);
+    }
     let closed = vd.close(false);
     result?;
     closed?;

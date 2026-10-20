@@ -7,6 +7,7 @@ pub mod display;
 pub mod ipc;
 pub mod outman;
 pub mod record;
+pub mod workspace;
 
 use std::path::PathBuf;
 
@@ -50,6 +51,23 @@ impl WlrootsBackend {
 impl Backend for WlrootsBackend {
     fn id(&self) -> BackendId {
         BackendId::Wlroots
+    }
+
+    fn supports_workspaces(&self) -> bool {
+        true
+    }
+
+    fn show_workspace(&mut self, output: &str, name: &str) -> Result<()> {
+        let focused = self
+            .ipc
+            .workspaces()?
+            .into_iter()
+            .find(|w| w.focused)
+            .map(|w| w.name);
+        for cmd in workspace::plan(name, output, focused.as_deref()) {
+            self.ipc.command(&cmd)?;
+        }
+        Ok(())
     }
 
     fn describe(&self) -> String {

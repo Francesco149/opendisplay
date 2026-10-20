@@ -176,6 +176,9 @@ fn layer_line(l: &Layer) -> String {
     if let Some(b) = l.bitrate_mbps {
         parts.push(format!("bitrate-mbps {b}"));
     }
+    if let Some(w) = &l.workspace {
+        parts.push(format!("workspace {w}"));
+    }
     if parts.is_empty() {
         "(nothing)".into()
     } else {

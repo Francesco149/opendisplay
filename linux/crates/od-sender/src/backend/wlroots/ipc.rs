@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 const RUN_COMMAND: u32 = 0;
+const GET_WORKSPACES: u32 = 1;
 const GET_OUTPUTS: u32 = 3;
 const GET_VERSION: u32 = 7;
 
@@ -46,6 +47,14 @@ pub struct Output {
     pub current_mode: Option<Mode>,
     #[serde(default)]
     pub scale: Option<f64>,
+}
+
+/// `get_workspaces`, the fields the sender reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Workspace {
+    pub name: String,
+    #[serde(default)]
+    pub focused: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +113,10 @@ impl SwayIpc {
 
     pub fn outputs(&self) -> Result<Vec<Output>> {
         self.request(GET_OUTPUTS, "")
+    }
+
+    pub fn workspaces(&self) -> Result<Vec<Workspace>> {
+        self.request(GET_WORKSPACES, "")
     }
 
     pub fn output(&self, name: &str) -> Result<Option<Output>> {

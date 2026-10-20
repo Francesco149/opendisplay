@@ -4,6 +4,7 @@
 pub mod display;
 pub mod instance;
 pub mod ipc;
+pub mod workspace;
 
 use std::path::PathBuf;
 
@@ -81,6 +82,29 @@ impl HyprlandBackend {
 impl Backend for HyprlandBackend {
     fn id(&self) -> BackendId {
         BackendId::Hyprland
+    }
+
+    fn supports_workspaces(&self) -> bool {
+        true
+    }
+
+    fn show_workspace(&mut self, output: &str, name: &str) -> Result<()> {
+        let ipc = self.ipc();
+        let monitors = ipc.monitors()?;
+        let workspaces = ipc.workspaces()?;
+        let ws = workspaces.iter().find(|w| w.matches(name));
+        let before = workspace::Before {
+            workspace_on: ws.map(|w| w.monitor.clone()),
+            already_shown: monitors.iter().any(|m| {
+                m.name == output && m.active_workspace.as_ref().is_some_and(|a| a.matches(name))
+            }),
+            focused: monitors.iter().find(|m| m.focused).map(|m| m.name.clone()),
+            cursor: ipc.cursor_pos().ok(),
+        };
+        for step in workspace::plan(name, output, &before) {
+            ipc.dispatch(&step)?;
+        }
+        Ok(())
     }
 
     fn describe(&self) -> String {
