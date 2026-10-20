@@ -103,6 +103,10 @@ impl Converter {
         })
     }
 
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     #[cfg(test)]
     fn bands(&self) -> usize {
         self.bands.len()

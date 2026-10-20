@@ -14,11 +14,15 @@
 mod convert;
 mod ffmpeg;
 mod openh264;
+mod stage;
+
+pub use stage::{ConvertStage, MIN_STAGE_WIDTH, YuvFrame};
 
 use std::time::Instant;
 
 use anyhow::{Result, bail};
 use clap::ValueEnum;
+use ffmpeg_next as ff;
 use opendisplay_proto::video::AccessUnit;
 use tracing::{debug, info};
 
@@ -132,17 +136,33 @@ impl Encoder {
         (self.width, self.height)
     }
 
-    /// Encode one frame. Only CPU frames in BGRX/BGRA are supported; a
-    /// dmabuf frame is an error until a VA-API backend exists. Returns the
-    /// pictures the encoder produced, in order: usually one, none when it
-    /// skipped the frame or holds it, two when a lagging encoder catches up.
+    /// The 4:2:0 format this encoder takes pre-converted frames in
+    /// ([`FrameBuf::Yuv`] from a [`ConvertStage`]), if any.
+    pub fn yuv_format(&self) -> Option<ff::format::Pixel> {
+        match &self.imp {
+            Imp::Ffmpeg(e) => Some(e.format()),
+            // OpenH264 converts with its own coefficients and announces no
+            // BT.709 colour; keep its frames BGRA.
+            Imp::OpenH264(_) => None,
+        }
+    }
+
+    /// Encode one frame: BGRX/BGRA, or already converted by a
+    /// [`ConvertStage`]; a dmabuf frame is an error until a VA-API backend
+    /// exists. Returns the pictures the encoder produced, in order: usually
+    /// one, none when it skipped the frame or holds it, two when a lagging
+    /// encoder catches up.
     pub fn encode(&mut self, frame: &Frame, force_idr: bool) -> Result<Vec<Encoded>> {
-        let FrameBuf::Cpu { pixels, stride, .. } = &frame.buf else {
-            bail!("{} cannot encode dmabuf frames", self.label());
-        };
-        match &mut self.imp {
-            Imp::Ffmpeg(e) => e.encode(pixels, *stride, force_idr, frame.captured_at),
-            Imp::OpenH264(e) => e.encode(pixels, *stride, force_idr, frame.captured_at),
+        match (&frame.buf, &mut self.imp) {
+            (FrameBuf::Cpu { pixels, stride, .. }, Imp::Ffmpeg(e)) => {
+                e.encode(pixels, *stride, force_idr, frame.captured_at)
+            }
+            (FrameBuf::Cpu { pixels, stride, .. }, Imp::OpenH264(e)) => {
+                e.encode(pixels, *stride, force_idr, frame.captured_at)
+            }
+            (FrameBuf::Yuv(y), Imp::Ffmpeg(e)) => e.encode_yuv(y, force_idr, frame.captured_at),
+            (FrameBuf::Yuv(_), _) => bail!("{} takes BGRA frames only", self.label()),
+            (FrameBuf::Dmabuf { .. }, _) => bail!("{} cannot encode dmabuf frames", self.label()),
         }
     }
 }

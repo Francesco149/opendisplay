@@ -1,11 +1,12 @@
 //! Continuous capture of one Wayland output through
 //! `ext-image-copy-capture-v1` into `wl_shm` buffers. This is the software
-//! path (pixels cross the CPU once); the dmabuf path for VA-API zero-copy
-//! encode lands with Spike 0 on hardware that has an encoder.
+//! path: the compositor writes each frame into one of a few mapped buffers,
+//! which is lent to the encoder as is (`shm_pool.rs`) and read once by the
+//! colour conversion. The dmabuf path for VA-API zero-copy encode lands with
+//! Spike 0 on hardware that has an encoder.
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
-use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -13,7 +14,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
 
-use crate::backend::{CaptureEvent, CaptureOptions, Frame, FrameBuf, FrameSink, PixelFormat};
+use super::shm_pool::{Lease, Mapping, Recycler};
+use crate::backend::{
+    CaptureEvent, CaptureOptions, Frame, FrameBuf, FrameSink, PixelFormat, Pixels,
+};
 use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::ext::image_capture_source::v1::client::{
@@ -36,9 +40,14 @@ pub struct FrameInfo {
     pub ready_at: Instant,
 }
 
+/// Buffers the compositor may be writing, lent out or free at once: one
+/// attached, one waiting in the encoder's latest-wins slot, one being
+/// encoded and the last one kept for an IDR replay on a static screen.
+const MAX_BUFFERS: usize = 4;
+
 struct ShmBuffer {
-    file: std::fs::File,
-    _pool: wl_shm_pool::WlShmPool,
+    map: Arc<Mapping>,
+    pool: wl_shm_pool::WlShmPool,
     buffer: wl_buffer::WlBuffer,
     width: u32,
     height: u32,
@@ -68,6 +77,7 @@ impl ShmBuffer {
             .open(&path)?;
         let _ = std::fs::remove_file(&path);
         file.set_len(size)?;
+        let map = Arc::new(Mapping::new(&file, size as usize)?);
         let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
         let buffer = pool.create_buffer(
             0,
@@ -79,14 +89,22 @@ impl ShmBuffer {
             (),
         );
         Ok(Self {
-            file,
-            _pool: pool,
+            map,
+            pool,
             buffer,
             width,
             height,
             stride,
             format,
         })
+    }
+}
+
+impl Drop for ShmBuffer {
+    /// A lease may still read the mapping; it holds its own reference.
+    fn drop(&mut self) {
+        self.buffer.destroy();
+        self.pool.destroy();
     }
 }
 
@@ -106,7 +124,9 @@ struct State {
         Option<ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1>,
     capture_mgr: Option<ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1>,
     session: SessionInfo,
-    buffer: Option<ShmBuffer>,
+    buffers: Vec<ShmBuffer>,
+    /// Index of the buffer attached to the frame in flight.
+    attached: Option<usize>,
     frame: Option<ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1>,
     frame_presentation: Option<u128>,
     ready: bool,
@@ -258,12 +278,12 @@ impl CaptureThread {
                         opts.cursor,
                         Duration::from_secs(u64::MAX / 4),
                         thread_stop.clone(),
-                        |info, pixels| {
+                        |info, lease| {
                             sink(CaptureEvent::Frame(Frame {
                                 captured_at: info.ready_at,
                                 presentation_ns: info.presentation_ns,
                                 buf: FrameBuf::Cpu {
-                                    pixels,
+                                    pixels: Pixels::Leased(Box::new(lease)),
                                     width: info.width,
                                     height: info.height,
                                     stride: info.stride,
@@ -318,14 +338,16 @@ fn pixel_format(f: wl_shm::Format) -> PixelFormat {
 }
 
 /// Capture `output_name` (or the first output) for `duration`, calling
-/// `on_frame` with each ready frame's pixels (rows of `stride` bytes, copied
-/// out of the shm buffer once). Returns the number of frames delivered.
+/// `on_frame` with each ready frame's pixels (rows of `stride` bytes) as a
+/// lease on the shm buffer they were captured into. The buffer is reused
+/// once the lease is dropped; holding [`MAX_BUFFERS`] leases pauses capture.
+/// Returns the number of frames delivered.
 pub fn capture_shm(
     output_name: Option<&str>,
     include_cursor: bool,
     duration: Duration,
     stop: Arc<AtomicBool>,
-    mut on_frame: impl FnMut(&FrameInfo, Vec<u8>),
+    mut on_frame: impl FnMut(&FrameInfo, Lease),
 ) -> Result<u64> {
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let mut queue = conn.new_event_queue::<State>();
@@ -337,7 +359,8 @@ pub fn capture_shm(
         source_mgr: None,
         capture_mgr: None,
         session: SessionInfo::default(),
-        buffer: None,
+        buffers: Vec::new(),
+        attached: None,
         frame: None,
         frame_presentation: None,
         ready: false,
@@ -392,37 +415,71 @@ pub fn capture_shm(
         st.session.width, st.session.height, st.session.shm_formats
     );
 
+    let recycler = Recycler::default();
     let start = Instant::now();
     let mut first_frame: Option<Duration> = None;
     let mut last_ready = start;
     let mut intervals_ms: Vec<f64> = Vec::new();
     while start.elapsed() < duration && !st.session.stopped && !stop.load(Ordering::Relaxed) {
-        // (Re)allocate the buffer to the session's current size.
-        let need_alloc = st
-            .buffer
-            .as_ref()
-            .is_none_or(|b| b.width != st.session.width || b.height != st.session.height);
-        if need_alloc {
-            let format = pick_format(&st.session.shm_formats)?;
-            st.buffer = Some(ShmBuffer::new(
-                &shm,
-                &qh,
-                st.session.width,
-                st.session.height,
-                format,
-            )?);
-            debug!(
-                "allocated {}x{} {:?}",
-                st.session.width, st.session.height, format
-            );
+        // Reallocate every buffer when the session's size changes.
+        if st
+            .buffers
+            .first()
+            .is_some_and(|b| b.width != st.session.width || b.height != st.session.height)
+        {
+            recycler.reset();
+            st.buffers.clear();
         }
         if st.frame.is_none() {
+            let index = match recycler.take() {
+                Some(i) => i,
+                None if st.buffers.len() < MAX_BUFFERS => {
+                    let format = pick_format(&st.session.shm_formats)?;
+                    st.buffers.push(ShmBuffer::new(
+                        &shm,
+                        &qh,
+                        st.session.width,
+                        st.session.height,
+                        format,
+                    )?);
+                    debug!(
+                        "allocated capture buffer {} at {}x{} {:?}",
+                        st.buffers.len(),
+                        st.session.width,
+                        st.session.height,
+                        format
+                    );
+                    st.buffers.len() - 1
+                }
+                None => {
+                    // Every buffer is lent out: the encoder is behind.
+                    recycler.wait(Duration::from_millis(250));
+                    continue;
+                }
+            };
+            // Hyprland 0.56.2 segfaults on a create_frame for an output whose
+            // monitor is already gone (research/hyprland-screenshare-
+            // transform.md): read what the compositor sent without blocking,
+            // and never create a frame on a stopped session.
+            dispatch_with_timeout(&conn, &mut queue, &mut st, Duration::ZERO)?;
+            if !may_create_frame(&st.session, stop.load(Ordering::Relaxed)) {
+                recycler.release(index);
+                break;
+            }
+            if (st.buffers[index].width, st.buffers[index].height)
+                != (st.session.width, st.session.height)
+            {
+                // Resized meanwhile: the top of the loop reallocates.
+                recycler.release(index);
+                continue;
+            }
             let frame = session.create_frame(&qh, ());
-            let b = st.buffer.as_ref().unwrap();
+            let b = &st.buffers[index];
             frame.attach_buffer(&b.buffer);
             frame.damage_buffer(0, 0, b.width as i32, b.height as i32);
             frame.capture();
             st.frame = Some(frame);
+            st.attached = Some(index);
             st.ready = false;
             st.failed = None;
             st.frame_presentation = None;
@@ -433,9 +490,9 @@ pub fn capture_shm(
             first_frame.get_or_insert(now - start);
             intervals_ms.push((now - last_ready).as_secs_f64() * 1000.0);
             last_ready = now;
-            let b = st.buffer.as_ref().unwrap();
-            let mut pixels = vec![0u8; (b.stride * b.height) as usize];
-            b.file.read_exact_at(&mut pixels, 0)?;
+            let index = st.attached.take().expect("a frame in flight has a buffer");
+            let b = &st.buffers[index];
+            let lease = recycler.lease(index, b.map.clone(), (b.stride * b.height) as usize);
             let info = FrameInfo {
                 width: b.width,
                 height: b.height,
@@ -444,7 +501,7 @@ pub fn capture_shm(
                 presentation_ns: st.frame_presentation,
                 ready_at: now,
             };
-            on_frame(&info, pixels);
+            on_frame(&info, lease);
             if let Some(f) = st.frame.take() {
                 f.destroy();
             }
@@ -453,11 +510,22 @@ pub fn capture_shm(
             if let Some(f) = st.frame.take() {
                 f.destroy();
             }
-            if matches!(
-                reason,
-                WEnum::Value(ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints)
-            ) {
-                st.buffer = None;
+            match after_failure(reason) {
+                AfterFailure::Reallocate => {
+                    recycler.reset();
+                    st.buffers.clear();
+                    st.attached = None;
+                }
+                AfterFailure::Retry => {
+                    if let Some(index) = st.attached.take() {
+                        recycler.release(index);
+                    }
+                }
+                AfterFailure::EndSession => {
+                    // The session is done even if its own `stopped` event has
+                    // not been dispatched yet.
+                    st.session.stopped = true;
+                }
             }
         }
     }
@@ -480,6 +548,32 @@ pub fn capture_shm(
         );
     }
     Ok(st.frames_ready)
+}
+
+/// Whether the loop may send another `create_frame`: never on a stopped
+/// session or after a stop request. One frame is in flight at a time (the
+/// loop only creates one when the previous is done).
+fn may_create_frame(session: &SessionInfo, stop_requested: bool) -> bool {
+    !session.stopped && !stop_requested
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AfterFailure {
+    /// Same buffers, next frame.
+    Retry,
+    /// The buffers no longer fit the session's constraints.
+    Reallocate,
+    /// The session is over (output gone): no further frame on it.
+    EndSession,
+}
+
+fn after_failure(reason: WEnum<ext_image_copy_capture_frame_v1::FailureReason>) -> AfterFailure {
+    use ext_image_copy_capture_frame_v1::FailureReason;
+    match reason {
+        WEnum::Value(FailureReason::BufferConstraints) => AfterFailure::Reallocate,
+        WEnum::Value(FailureReason::Stopped) => AfterFailure::EndSession,
+        _ => AfterFailure::Retry,
+    }
 }
 
 fn pick_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
@@ -543,4 +637,36 @@ fn libc_pollfd(fd: i32) -> PollFd {
 unsafe extern "C" {
     #[link_name = "poll"]
     fn libc_poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ext_image_copy_capture_frame_v1::FailureReason;
+
+    #[test]
+    fn no_frame_on_a_stopped_session_or_after_stop() {
+        let mut s = SessionInfo::default();
+        assert!(may_create_frame(&s, false));
+        assert!(!may_create_frame(&s, true));
+        s.stopped = true;
+        assert!(!may_create_frame(&s, false));
+    }
+
+    #[test]
+    fn a_stopped_frame_ends_the_session() {
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::Stopped)),
+            AfterFailure::EndSession
+        );
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::BufferConstraints)),
+            AfterFailure::Reallocate
+        );
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::Unknown)),
+            AfterFailure::Retry
+        );
+        assert_eq!(after_failure(WEnum::Unknown(99)), AfterFailure::Retry);
+    }
 }

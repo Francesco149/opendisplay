@@ -25,7 +25,7 @@ use crate::backend::{
 };
 use crate::config::{self, Config, Layer};
 use crate::desktop::{self, Debounce, DesktopOptions, DesktopPlan, PlanError, StreamPlan};
-use crate::encoder::{Encoded, Encoder, EncoderSettings};
+use crate::encoder::{ConvertStage, Encoded, Encoder, EncoderSettings};
 use crate::latest;
 use crate::wayland::cursor::base64;
 
@@ -219,6 +219,8 @@ struct EncodePipeline {
     stop: Arc<AtomicBool>,
     force_idr: Arc<AtomicBool>,
     raw_tx: Option<latest::Sender<Frame>>,
+    /// Converts large frames ahead of the encoder (encoder/stage.rs).
+    stage: ConvertStage,
     encoded_rx: mpsc::Receiver<Encoded>,
     lost_tx: mpsc::UnboundedSender<String>,
     lost_rx: mpsc::UnboundedReceiver<String>,
@@ -233,6 +235,8 @@ impl EncodePipeline {
         let (lost_tx, lost_rx) = mpsc::unbounded_channel();
         let enc_stop = stop.clone();
         let enc_force = force_idr.clone();
+        let stage = ConvertStage::new();
+        let enc_stage = stage.clone();
         spawn_reporting_panics("encode", lost_tx.clone(), move || {
             let mut encoder: Option<Encoder> = None;
             let mut last: Option<Frame> = None;
@@ -285,6 +289,7 @@ impl EncodePipeline {
                             );
                             // A resize reopens the same backend without probing.
                             settings.backend = e.backend();
+                            enc_stage.bind(&e);
                             encoder = Some(e);
                             enc_force.store(true, Ordering::Relaxed);
                         }
@@ -318,6 +323,7 @@ impl EncodePipeline {
             stop,
             force_idr,
             raw_tx: Some(raw_tx),
+            stage,
             encoded_rx,
             lost_tx,
             lost_rx,
@@ -330,14 +336,14 @@ impl EncodePipeline {
     fn sink(&mut self) -> FrameSink {
         let raw_tx = self.raw_tx.take().expect("one sink per pipeline");
         let lost_tx = self.lost_tx.clone();
-        Box::new(move |ev| match ev {
+        self.stage.sink(Box::new(move |ev| match ev {
             CaptureEvent::Frame(f) => {
                 raw_tx.send(f);
             }
             CaptureEvent::Ended(why) => {
                 let _ = lost_tx.send(why);
             }
-        })
+        }))
     }
 }
 

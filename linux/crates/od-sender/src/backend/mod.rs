@@ -221,15 +221,47 @@ pub struct Frame {
     pub buf: FrameBuf,
 }
 
+/// The bytes of a CPU frame: owned, or leased from the capture's buffer
+/// pool (no copy; the buffer goes back to the pool when this is dropped).
+pub enum Pixels {
+    Owned(Vec<u8>),
+    Leased(Box<dyn PixelLease>),
+}
+
+/// A capture buffer lent out for one frame.
+pub trait PixelLease: Send {
+    fn bytes(&self) -> &[u8];
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Pixels::Owned(v) => v,
+            Pixels::Leased(l) => l.bytes(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for Pixels {
+    fn from(v: Vec<u8>) -> Self {
+        Pixels::Owned(v)
+    }
+}
+
 pub enum FrameBuf {
     Cpu {
-        pixels: Vec<u8>,
+        pixels: Pixels,
         width: u32,
         height: u32,
         stride: u32,
         #[allow(dead_code)] // the encoders assume BGRX/BGRA, which is what capture prefers
         format: PixelFormat,
     },
+    /// Already converted to the encoder's 4:2:0 format by the convert stage
+    /// ([`crate::encoder::ConvertStage`]).
+    Yuv(crate::encoder::YuvFrame),
     /// GPU buffer for zero-copy hardware encode; not produced yet (VA-API).
     #[allow(dead_code)]
     Dmabuf { width: u32, height: u32 },
@@ -241,6 +273,7 @@ impl Frame {
             FrameBuf::Cpu { width, height, .. } | FrameBuf::Dmabuf { width, height } => {
                 (width, height)
             }
+            FrameBuf::Yuv(ref y) => y.dimensions(),
         }
     }
 }
