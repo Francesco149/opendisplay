@@ -11,6 +11,7 @@
 //!
 //! VA-API (Intel/AMD) slots in as another FFmpeg backend ahead of x264.
 
+mod convert;
 mod ffmpeg;
 mod openh264;
 
