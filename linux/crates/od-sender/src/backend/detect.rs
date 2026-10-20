@@ -758,7 +758,7 @@ mod tests {
         let (w, _) = run(&env, &force(BackendId::Wlroots), None);
         assert!(unsupported(&w).contains("SWAYSOCK is not set"));
         let (w, _) = run(&env, &force(BackendId::Gnome), None);
-        assert_eq!(w.decision, Decision::Gnome);
+        assert_gnome(&w);
         let (w, _) = run(&env, &force(BackendId::Kde), None);
         assert!(unsupported(&w).contains("--backend kde"));
         let (w, _) = run(&env, &force(BackendId::Portal), None);
@@ -775,7 +775,25 @@ mod tests {
             };
             // Mutter offers neither wlr virtual pointer nor KDE protocols.
             let (w, _) = run(&env, &Request::default(), Some(Snapshot::default()));
-            assert_eq!(w.decision, Decision::Gnome, "{desktop}");
+            assert_gnome(&w);
+        }
+    }
+
+    /// KDE when built with it, else a message naming the missing feature.
+    fn assert_kde(w: &Walk) {
+        if cfg!(feature = "kde") {
+            assert_eq!(w.decision, Decision::Kde, "{:?}", w.steps);
+        } else {
+            assert!(unsupported(w).contains("without KDE support"), "{w:?}");
+        }
+    }
+
+    /// GNOME when built with it, else a message naming the missing feature.
+    fn assert_gnome(w: &Walk) {
+        if cfg!(feature = "gnome") {
+            assert_eq!(w.decision, Decision::Gnome, "{:?}", w.steps);
+        } else {
+            assert!(unsupported(w).contains("without GNOME support"), "{w:?}");
         }
     }
 
@@ -798,9 +816,7 @@ mod tests {
             outputs: vec![],
         };
         let (w, _) = run(&env, &Request::default(), Some(kwin(6, 6)));
-        if cfg!(feature = "kde") {
-            assert_eq!(w.decision, Decision::Kde);
-        }
+        assert_kde(&w);
         let (w, _) = run(&env, &Request::default(), Some(kwin(1, 2)));
         assert!(unsupported(&w).contains("too old"));
         // Forced, outside a KDE session, still decided by the globals.
@@ -813,9 +829,7 @@ mod tests {
             ..Default::default()
         };
         let (w, _) = run(&plain, &forced, Some(kwin(6, 6)));
-        if cfg!(feature = "kde") {
-            assert_eq!(w.decision, Decision::Kde);
-        }
+        assert_kde(&w);
 
         let env = Environment {
             session_type: Some("x11".into()),
