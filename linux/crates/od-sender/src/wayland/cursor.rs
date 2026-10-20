@@ -206,8 +206,13 @@ pub struct CursorSpace {
     /// The output's size in the units of `position`.
     pub width: f64,
     pub height: f64,
-    /// Sprite buffer pixels per `position`/`hotspot` unit.
+    /// Sprite buffer pixels per `position`/`hotspot` unit, at most: the
+    /// highest monitor scale on Hyprland.
     pub sprite_scale: f64,
+    /// The cursor theme's size in units (`HYPRCURSOR_SIZE`/`XCURSOR_SIZE`),
+    /// when known: a sprite of n times that many pixels is at scale n, which
+    /// catches a compositor that did not load the theme at `sprite_scale`.
+    pub theme_size: Option<f64>,
 }
 
 impl CursorSpace {
@@ -217,14 +222,25 @@ impl CursorSpace {
             width: width.max(1) as f64,
             height: height.max(1) as f64,
             sprite_scale: 1.0,
+            theme_size: None,
+        }
+    }
+
+    /// The scale a `w`x`h` sprite is rendered at.
+    pub fn scale_of(&self, w: u32, h: u32) -> f64 {
+        let max = self.sprite_scale.max(1.0);
+        match self.theme_size {
+            Some(t) if t > 0.0 => (w.max(h) as f64 / t).clamp(1.0, max),
+            _ => max,
         }
     }
 
     /// `cursorImg` geometry for a `w`x`h` sprite with this hotspot:
     /// (nw, nh, ax, ay), PROTOCOL §6.2 / §7.
     pub fn sprite_geometry(&self, w: u32, h: u32, hotspot: (i32, i32)) -> (f64, f64, f64, f64) {
-        let lw = w.max(1) as f64 / self.sprite_scale;
-        let lh = h.max(1) as f64 / self.sprite_scale;
+        let scale = self.scale_of(w, h);
+        let lw = w.max(1) as f64 / scale;
+        let lh = h.max(1) as f64 / scale;
         (
             lw / self.width,
             lh / self.height,
@@ -232,6 +248,16 @@ impl CursorSpace {
             (hotspot.1 as f64 / lh).clamp(0.0, 1.0),
         )
     }
+}
+
+/// The cursor theme size from the environment the compositor shares with
+/// its clients (`HYPRCURSOR_SIZE`, then `XCURSOR_SIZE`), default 24.
+pub fn theme_size() -> Option<f64> {
+    ["HYPRCURSOR_SIZE", "XCURSOR_SIZE"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok()?.trim().parse::<f64>().ok())
+        .filter(|s| *s > 0.0)
+        .or(Some(24.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +289,10 @@ impl Positions {
 
     pub fn enter(&mut self) {
         self.inside = true;
+    }
+
+    pub fn inside(&self) -> bool {
+        self.inside
     }
 
     pub fn leave(&mut self) {
@@ -570,6 +600,16 @@ impl CursorThread {
     /// reports in `space`. Returns once the cursor session exists, or with
     /// the reason it cannot.
     pub fn spawn(name: &str, space: CursorSpace, sink: CursorSink) -> Result<Self> {
+        Self::spawn_with_debug(name, space, sink, None)
+    }
+
+    /// [`spawn`](Self::spawn) plus low-level session events for diagnostics.
+    pub fn spawn_with_debug(
+        name: &str,
+        space: CursorSpace,
+        sink: CursorSink,
+        debug_sink: Option<DebugSink>,
+    ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let name = name.to_string();
@@ -578,7 +618,7 @@ impl CursorThread {
             .name("cursor".into())
             .spawn(move || {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&name, space, sink, &thread_stop, &ready_tx)
+                    run(&name, space, sink, debug_sink, &thread_stop, &ready_tx)
                 }));
                 match r {
                     Ok(Ok(())) => {}
@@ -624,14 +664,97 @@ impl Drop for CursorThread {
 
 /// Consecutive failed sprite frames before the sprite is given up.
 const MAX_SPRITE_FAILURES: u32 = 5;
+/// Cursor sessions reopened to fetch a current sprite, at most this often.
+const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What a captured sprite is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteKind {
+    /// A cursor image.
+    Cursor,
+    /// Fully transparent: the cursor is hidden (Hyprland renders "clear"
+    /// when the pointer has no image).
+    Clear,
+    /// Opaque black everywhere: Hyprland's placeholder when the cursor was
+    /// not over the output at copy time (or capture is not permitted),
+    /// `CCursorshareSession::render`. Never a real cursor.
+    Placeholder,
+}
+
+/// Classify premultiplied 32-bit pixels (either byte order: black and
+/// alpha positions agree for the checks made here).
+pub fn sprite_kind(
+    px: &[u8],
+    order: SpriteOrder,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> SpriteKind {
+    let (mut all_clear, mut all_black) = (true, true);
+    for y in 0..height as usize {
+        let row = &px[y * stride as usize..][..width as usize * 4];
+        for p in row.chunks_exact(4) {
+            let (c, a) = match order {
+                SpriteOrder::Bgra | SpriteOrder::Rgba => ([p[0], p[1], p[2]], p[3]),
+            };
+            all_clear &= a == 0;
+            all_black &= a == 255 && c == [0, 0, 0];
+        }
+    }
+    if all_black {
+        SpriteKind::Placeholder
+    } else if all_clear {
+        SpriteKind::Clear
+    } else {
+        SpriteKind::Cursor
+    }
+}
+
+/// Low-level cursor session events for `dev cursor-test --save-raw`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields are read through `Debug` when logged
+pub enum CursorDebug {
+    SessionOpened {
+        reason: &'static str,
+    },
+    Constraints {
+        size: (u32, u32),
+        formats: Vec<String>,
+    },
+    Ready {
+        hotspot: (i32, i32),
+        kind: SpriteKind,
+    },
+    Failed(String),
+    Raw {
+        px: Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: String,
+    },
+}
+
+pub type DebugSink = Box<dyn FnMut(CursorDebug) + Send>;
+
+type CursorSessions = (
+    ext_image_copy_capture_cursor_session_v1::ExtImageCopyCaptureCursorSessionV1,
+    ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1,
+);
 
 fn run(
     name: &str,
     space: CursorSpace,
     mut sink: CursorSink,
+    mut debug_sink: Option<DebugSink>,
     stop: &AtomicBool,
     ready: &std::sync::mpsc::Sender<Result<()>>,
 ) -> Result<()> {
+    let mut dbg = |d: CursorDebug| {
+        if let Some(s) = debug_sink.as_mut() {
+            s(d);
+        }
+    };
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let mut queue = conn.new_event_queue::<State>();
     let qh = queue.handle();
@@ -658,13 +781,18 @@ fn run(
 
     let pointer = seat.get_pointer(&qh, ());
     let source = source_mgr.create_source(&output, &qh, ());
-    let cursor_session = capture_mgr.create_pointer_cursor_session(&source, &pointer, &qh, ());
-    let session = cursor_session.get_capture_session(&qh, ());
+    let open = |qh: &QueueHandle<State>| -> CursorSessions {
+        let c = capture_mgr.create_pointer_cursor_session(&source, &pointer, qh, ());
+        let s = c.get_capture_session(qh, ());
+        (c, s)
+    };
+    let mut sessions = open(&qh);
     queue.roundtrip(&mut st)?;
     if st.stopped {
         bail!("the compositor refused the cursor session");
     }
     let _ = ready.send(Ok(()));
+    dbg(CursorDebug::SessionOpened { reason: "start" });
     debug!("cursor session for {name} open; the video keeps its cursor until the first sprite");
 
     let mut positions = Positions::new(space);
@@ -679,12 +807,21 @@ fn run(
     let mut frame: Option<ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1> = None;
     let mut hotspot = (0, 0);
     let mut last_sprite: Option<(Vec<u8>, (i32, i32))> = None;
+    // A real cursor image was sent; until then nothing but a real one goes.
+    let mut have_sprite = false;
+    // The last copy was Hyprland's placeholder: fetch the sprite again once
+    // the cursor is over the output (a new session copies at once; an old
+    // one only when the cursor image changes).
+    let mut stale = false;
+    let mut last_open = Instant::now();
+    let mut seen_constraints = None;
     let mut wait = Duration::from_millis(100);
     while !stop.load(Ordering::Relaxed) && !st.stopped {
         dispatch_with_timeout(&conn, &mut queue, &mut st, wait)?;
         wait = Duration::from_millis(100);
 
-        match st.entered.take() {
+        let entered = st.entered.take();
+        match entered {
             Some(true) => positions.enter(),
             Some(false) => positions.leave(),
             None => {}
@@ -700,9 +837,34 @@ fn run(
             wait = again;
         }
 
-        // The sprite: capture a frame whenever the constraints are known; the
-        // compositor completes it when the cursor image changes.
+        if stale && !sprite_failed && positions.inside() && last_open.elapsed() >= REOPEN_INTERVAL {
+            // Fetch the current sprite with a fresh session (Hyprland copies
+            // the first frame of a session at once).
+            stale = false;
+            last_open = Instant::now();
+            if let Some(f) = frame.take() {
+                f.destroy();
+            }
+            buffer = None;
+            sessions.1.destroy();
+            sessions.0.destroy();
+            st.constraints = Constraints::default();
+            st.hotspot_pending = None;
+            sessions = open(&qh);
+            dbg(CursorDebug::SessionOpened {
+                reason: "refresh sprite",
+            });
+            continue;
+        }
+
         let c = &st.constraints;
+        if c.known && seen_constraints.as_ref() != Some(c) {
+            seen_constraints = Some(c.clone());
+            dbg(CursorDebug::Constraints {
+                size: c.size,
+                formats: c.formats.iter().map(|f| format!("{f:?}")).collect(),
+            });
+        }
         if !sprite_failed && c.known && c.size.0 > 0 && c.size.1 > 0 {
             let fits = buffer
                 .as_ref()
@@ -739,16 +901,34 @@ fn run(
             if let Some((b, order)) = &buffer {
                 let mut px = vec![0u8; (b.stride * b.height) as usize];
                 b.file.read_exact_at(&mut px, 0)?;
-                if last_sprite.as_ref() != Some(&(px.clone(), hotspot)) {
+                let kind = sprite_kind(&px, *order, b.width, b.height, b.stride);
+                dbg(CursorDebug::Ready { hotspot, kind });
+                dbg(CursorDebug::Raw {
+                    px: px.clone(),
+                    width: b.width,
+                    height: b.height,
+                    stride: b.stride,
+                    format: format!("{order:?}"),
+                });
+                let send = match kind {
+                    SpriteKind::Cursor => true,
+                    // A hidden cursor is news only to a receiver drawing one.
+                    SpriteKind::Clear => have_sprite,
+                    SpriteKind::Placeholder => {
+                        stale = true;
+                        false
+                    }
+                };
+                if send && last_sprite.as_ref() != Some(&(px.clone(), hotspot)) {
                     let rgba = premul_to_rgba(&px, *order, b.width, b.height, b.stride);
                     let png = sprite_png(rgba, b.width, b.height);
+                    let (nw, nh, ax, ay) = space.sprite_geometry(b.width, b.height, hotspot);
                     debug!(
                         "cursor sprite {}x{} hotspot {hotspot:?}: {} bytes PNG",
                         b.width,
                         b.height,
                         png.len()
                     );
-                    let (nw, nh, ax, ay) = space.sprite_geometry(b.width, b.height, hotspot);
                     sink(CursorEvent::Image {
                         png,
                         nw,
@@ -756,6 +936,7 @@ fn run(
                         ax,
                         ay,
                     });
+                    have_sprite = true;
                     last_sprite = Some((px, hotspot));
                 }
             }
@@ -763,6 +944,7 @@ fn run(
             if let Some(f) = frame.take() {
                 f.destroy();
             }
+            dbg(CursorDebug::Failed(format!("{reason:?}")));
             match reason {
                 WEnum::Value(ext_image_copy_capture_frame_v1::FailureReason::Stopped) => break,
                 WEnum::Value(ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints) => {
@@ -784,7 +966,7 @@ fn run(
         }
         if frame.is_none() && !sprite_failed {
             if let Some((b, _)) = &buffer {
-                let f = session.create_frame(&qh, ());
+                let f = sessions.1.create_frame(&qh, ());
                 f.attach_buffer(&b.buffer);
                 f.damage_buffer(0, 0, b.width as i32, b.height as i32);
                 f.capture();
@@ -796,8 +978,8 @@ fn run(
         f.destroy();
     }
     drop(buffer);
-    session.destroy();
-    cursor_session.destroy();
+    sessions.1.destroy();
+    sessions.0.destroy();
     source.destroy();
     if pointer.version() >= 3 {
         pointer.release();
@@ -931,6 +1113,7 @@ mod tests {
                 width: 1280.0 / scale,
                 height: 800.0 / scale,
                 sprite_scale: scale,
+                theme_size: None,
             };
             let mut p = Positions::new(space);
             p.enter();
@@ -953,10 +1136,23 @@ mod tests {
             width: 640.0,
             height: 400.0,
             sprite_scale: 2.0,
+            theme_size: Some(24.0),
         };
         let (nw, nh, ax, ay) = space.sprite_geometry(48, 48, (4, 2));
         assert_eq!((nw, nh), (24.0 / 640.0, 24.0 / 400.0));
         assert_eq!((ax, ay), (4.0 / 24.0, 2.0 / 24.0));
+        // The nested run: a 24 px sprite with a 24 theme is scale 1 even
+        // though the highest monitor scale is 2.
+        let (nw, _, ax, _) = space.sprite_geometry(24, 24, (4, 2));
+        assert_eq!((nw, ax), (24.0 / 640.0, 4.0 / 24.0));
+        // Never beyond the highest monitor scale.
+        assert_eq!(space.scale_of(96, 96), 2.0);
+        // Without a theme size: the highest monitor scale.
+        let bare = CursorSpace {
+            theme_size: None,
+            ..space
+        };
+        assert_eq!(bare.scale_of(24, 24), 2.0);
         // Per the protocol: everything in pixels.
         let (nw, _, ax, _) = CursorSpace::pixels(1920, 1080).sprite_geometry(32, 32, (8, 8));
         assert_eq!((nw, ax), (32.0 / 1920.0, 0.25));
@@ -989,6 +1185,20 @@ mod tests {
         c.shm_format(WEnum::Value(wl_shm::Format::Xrgb8888));
         c.done();
         assert_eq!(c.sprite_format(), None, "no alpha, no sprite");
+    }
+
+    #[test]
+    fn hyprlands_placeholder_and_clear_sprites_are_recognised() {
+        let black = [0, 0, 0, 255].repeat(4);
+        let clear = [0u8; 16];
+        let mut arrow = black.clone();
+        arrow[4..8].copy_from_slice(&[255, 255, 255, 255]);
+        arrow[8..12].copy_from_slice(&[0, 0, 0, 0]);
+        for order in [SpriteOrder::Bgra, SpriteOrder::Rgba] {
+            assert_eq!(sprite_kind(&black, order, 2, 2, 8), SpriteKind::Placeholder);
+            assert_eq!(sprite_kind(&clear, order, 2, 2, 8), SpriteKind::Clear);
+            assert_eq!(sprite_kind(&arrow, order, 2, 2, 8), SpriteKind::Cursor);
+        }
     }
 
     #[test]

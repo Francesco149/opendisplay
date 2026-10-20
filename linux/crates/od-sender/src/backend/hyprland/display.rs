@@ -89,6 +89,7 @@ impl OutputControl for HyprlandOutput {
             width: self.info.width as f64 / scale,
             height: self.info.height as f64 / scale,
             sprite_scale: highest,
+            theme_size: crate::wayland::cursor::theme_size(),
         }
     }
 

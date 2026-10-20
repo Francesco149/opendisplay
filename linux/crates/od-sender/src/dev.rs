@@ -90,6 +90,11 @@ pub enum Dev {
         /// Write the last sprite PNG here.
         #[arg(long)]
         save: Option<std::path::PathBuf>,
+        /// Diagnostics: log every session event (constraints, ready/failed)
+        /// and write each captured sprite's raw shm bytes into this directory
+        /// as frame-N.raw with frame-N.txt (size, stride, byte order).
+        #[arg(long, value_name = "DIR")]
+        save_raw: Option<std::path::PathBuf>,
     },
     /// Through the detected backend: open (or adopt) a display, capture and
     /// encode `--frames` frames while moving the pointer over it, scroll
@@ -197,7 +202,8 @@ pub fn run(cmd: Dev) -> Result<()> {
             output,
             seconds,
             save,
-        } => cursor_test(&output, Duration::from_secs_f64(seconds), save),
+            save_raw,
+        } => cursor_test(&output, Duration::from_secs_f64(seconds), save, save_raw),
         Dev::Smoke {
             size,
             frames,
@@ -339,7 +345,12 @@ fn capture_test(
     Ok(())
 }
 
-fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>) -> Result<()> {
+fn cursor_test(
+    output: &str,
+    seconds: Duration,
+    save: Option<std::path::PathBuf>,
+    save_raw: Option<std::path::PathBuf>,
+) -> Result<()> {
     use crate::backend::CursorEvent;
     let snap = crate::wayland::registry::snapshot()?;
     let o = snap
@@ -359,21 +370,51 @@ fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>
                 width: w as f64 / scale,
                 height: h as f64 / scale,
                 sprite_scale: highest,
+                theme_size: crate::wayland::cursor::theme_size(),
             }
         }
         Err(_) => crate::wayland::cursor::CursorSpace::pixels(w, h),
     };
     info!(
-        "following the cursor on {output} ({w}x{h} px, positions in {:.1}x{:.1}, sprite scale {}) for {seconds:?}; move the pointer over it",
-        space.width, space.height, space.sprite_scale
+        "following the cursor on {output} ({w}x{h} px, positions in {:.1}x{:.1}, sprite scale up to {}, theme size {:?}) for {seconds:?}; move the pointer over it",
+        space.width, space.height, space.sprite_scale, space.theme_size
     );
+    let debug_sink: Option<crate::wayland::cursor::DebugSink> = match save_raw {
+        Some(dir) => {
+            use crate::wayland::cursor::CursorDebug;
+            std::fs::create_dir_all(&dir)?;
+            let mut n = 0u32;
+            Some(Box::new(move |d: CursorDebug| match d {
+                CursorDebug::Raw {
+                    px,
+                    width,
+                    height,
+                    stride,
+                    format,
+                } => {
+                    n += 1;
+                    let base = dir.join(format!("frame-{n}"));
+                    let meta = format!("{width}x{height} stride {stride} order {format}\n");
+                    let r = std::fs::write(base.with_extension("raw"), &px)
+                        .and_then(|_| std::fs::write(base.with_extension("txt"), meta));
+                    match r {
+                        Ok(()) => info!("raw: wrote {}.raw ({} bytes)", base.display(), px.len()),
+                        Err(e) => warn!("raw: {e}"),
+                    }
+                }
+                other => info!("session: {other:?}"),
+            }))
+        }
+        None => None,
+    };
     let (tx, rx) = std::sync::mpsc::channel::<CursorEvent>();
-    let mut thread = crate::wayland::cursor::CursorThread::spawn(
+    let mut thread = crate::wayland::cursor::CursorThread::spawn_with_debug(
         output,
         space,
         Box::new(move |ev| {
             let _ = tx.send(ev);
         }),
+        debug_sink,
     )?;
     let start = Instant::now();
     let (mut moves, mut sprites) = (0u32, 0u32);
