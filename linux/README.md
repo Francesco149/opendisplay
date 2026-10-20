@@ -61,9 +61,12 @@ are the quick path.
 Prebuilt `x86_64` and `aarch64` tarballs are attached to the `linux-v*`
 pre-releases on the [releases page](https://github.com/peetzweg/opendisplay/releases).
 They link a minimal FFmpeg and x264 statically, so no FFmpeg install is
-needed; they run on glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39
-and later) and need PipeWire's library, `libpipewire-0.3`, which every
-current desktop already has. Unpack and run the installer:
+needed; they run on glibc 2.38 or newer on x86_64 (Ubuntu 24.04, Debian 13,
+Fedora 39 and later) and glibc 2.39 or newer on aarch64 (Ubuntu 24.04,
+Debian 13, Fedora 40 and later), and need PipeWire's library,
+`libpipewire-0.3`, which every current desktop already has. Licence texts
+for the bundled FFmpeg, x264, OpenH264 and Rust crates are in
+`THIRD-PARTY-LICENSES.txt`. Unpack and run the installer:
 
 ```sh
 tar xf od-sender-*-linux-gnu.tar.gz && cd od-sender-*-linux-gnu
@@ -152,7 +155,7 @@ Useful `run` options:
 | `--position` | `auto-right` | Where the virtual display goes: `auto-right`, `auto-left`, `auto-up`, `auto-down`, or `x,y` |
 | `--scale` | `passthrough` | `passthrough` (the receiver's own, 3 on most iPhones), `mac` (2 for Retina-class screens, else 1, like the Mac sender) or a number. GNOME and Hyprland round to a scale they support (GNOME: an iPhone's 3 becomes 2; Hyprland: a Pixel's 2.625 becomes 2.667). If text is too small, try a larger number |
 | `--bitrate-mbps` | `20` | Video bitrate |
-| `--max-fps` | receiver's panel rate | Frame-rate cap |
+| `--max-fps` | 60 | Frame-rate cap; above 60 only when the receiver's decoder advertises it, and never above its panel rate |
 | `--encoder` | `auto` | `auto`, `v4l2m2m`, `x264` or `openh264` |
 | `--cursor` | `auto` | `auto`, `video` (always paint the cursor into the video) or `off`; `--no-cursor` is `off`. `auto` sends the cursor separately when the receiver and desktop support it, which today means never on Hyprland |
 | `--capture` | `auto` | Screen-capture protocol on Hyprland and Sway: `auto`, `ext` or `wlr`. `auto` uses `wlr` on Hyprland before 0.57, whose `ext` capture can crash when a display disappears |
