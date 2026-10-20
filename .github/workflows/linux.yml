@@ -102,7 +102,8 @@ jobs:
   arch-package:
     name: arch package (x86_64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Package, sway smoke, then the GTK receiver build and its two smokes.
+    timeout-minutes: 45
     container: archlinux:latest
     steps:
       # git before checkout, or actions/checkout falls back to a tarball and
