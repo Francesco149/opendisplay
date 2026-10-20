@@ -1,6 +1,7 @@
 # Linux sender: plan to a public beta
 
-Status: **draft for decision**, 2026-10-20. Branch `linux-plan`, PR #298,
+Status: **working plan**, updated 2026-10-20 (§2 has the dated state).
+Branch `linux-plan`, PR #298,
 issue #299. Scope: `od-sender` only. History, research and the receiver are
 in `PLAN.md` (§3.5, §3.6, §3.9, §4 M3); this file supersedes the sender
 parts of §4 M3/M4/M6 and is the working plan from here.
@@ -31,9 +32,11 @@ means the supported matrix is narrow and stated, not that the code is rough.
 
 | Tier | Setup | Meaning |
 |---|---|---|
-| **Tested** | Arch/Omarchy, Hyprland 0.56.x, aarch64 (Asahi, M1 Pro), software x264 encode; receivers: iPhone (App Store), Android (Play beta), Mac receiver app (Intel) | Every item in §5 ran here before tagging |
-| **Expected to work** | Arch/Omarchy on x86_64 (same binary paths; VA-API is not used yet, so it is x264 there too); any distro with Hyprland >= 0.55 and an FFmpeg built with libx264 (Fedora's `ffmpeg-free` falls back to the bundled OpenH264, slower); iPad; **Sway >= 1.10** (wlroots backend, verified end to end only on headless Sway in CI, never on a real Sway desktop); other wlroots compositors (river, labwc, Wayfire) via `--output <name>` adopt mode only | Same code, untested hardware or receiver. Say so on the website; ask for reports |
-| **Unsupported at beta** | niri/COSMIC (unchecked), GNOME, KDE, X11 sessions, Hyprland < 0.55 (pre-Lua IPC), USB/usbmuxd transport, HEVC, Apple Pencil pressure (mapped to a pointer), audio, mirror mode | `od-sender` exits with a message that names the gap and links the issue |
+| **Tested** | Arch/Omarchy, Hyprland 0.56.x, aarch64 (Asahi, M1 Pro), software x264 encode; receivers: iPhone (App Store), Mac receiver app (Intel iMac) | Ran live on this machine |
+| **Expected to work** | Arch/Omarchy on x86_64 (x264; VA-API not used yet); any distro with Hyprland >= 0.55 and an FFmpeg with libx264 (Fedora's `ffmpeg-free`: bundled OpenH264, slower); iPad; Android (Play beta, never run, §5 step 5) | Same code, untested hardware or receiver |
+| **Experimental: verified headless only** | **Sway >= 1.10** (`backend/wlroots`); **KDE Plasma >= 6.8** (`backend/kde`; <= 6.7 only with the packaged `od-sender.desktop`, §8.12); **GNOME, Mutter >= 50** (`backend/gnome`; older Mutter sizes the monitor from the PipeWire format, untested). Each passes its CI smoke on a headless compositor (§4.3), never a real desktop session | Say "experimental" on the website; ask for reports |
+| **Adopt only** | niri, COSMIC, river, labwc, Wayfire: `--output <name>` on an output you created, if the compositor offers ext-image-copy-capture (or wlr-screencopy) and `zwlr_virtual_pointer` | No output creation; unchecked per compositor |
+| **Unsupported** | X11 sessions, Hyprland < 0.55 (pre-Lua IPC), Flatpak (no portal backend), USB/usbmuxd transport, HEVC, Apple Pencil pressure (mapped to a pointer), audio, mirror mode | `od-sender` exits with a message that names the gap and links the issue |
 
 ### 1.2 Exit criteria (all on this machine unless noted)
 
@@ -62,41 +65,32 @@ compositors, Flatpak, HEVC.
 
 ---
 
-## 2. Where the sender stands (2026-10-20)
+## 2. Where the sender stands
 
-Verified live against the iPhone (PLAN.md §4 M3 status): virtual output via
-Hyprland IPC sized from `hello`; `ext-image-copy-capture-v1` shm capture with
-the cursor painted in; encoder chosen at run time (`auto|v4l2m2m|x264|openh264`
-through `ffmpeg-next`, bundled OpenH264 floor); `streamConfig`, IDR on
-connect/`kf` with static-screen replay; `touch`/`scroll` through
-`zwlr_virtual_pointer_v1` bound to the output; mDNS discovery; frame cap at
-`displayMaxFrameRate`; ~19-21 ms capture-to-arrival p50 at ~72 fps.
+*Status 2026-10-20.* Done: the trait split (§3) with backends for Hyprland
+(IPC headless outputs), wlroots/Sway (IPC create/unplug,
+`zwlr_output_manager_v1` sizing), KDE (zkde_screencast virtual output, KWin
+fake input, PipeWire frames) and GNOME (Mutter's ScreenCast/RemoteDesktop
+D-Bus APIs, PipeWire frames), plus adopt mode; capture through
+ext-image-copy-capture or wlr-screencopy (`--capture`, auto picks
+wlr-screencopy on Hyprland < 0.57, §8.13), zero-copy shm leases and banded
+BGRA→I420 ahead of x264; desktop policy from `hello.panel` with a 300 ms
+`hello` debounce; config file, `doctor`, `list`, `clean`, `--instance`;
+one-sender-per-receiver lock, redial backoff, recreation of a removed
+output, orderly teardown on SIGINT/SIGTERM/SIGHUP and on panics; cursor side
+channel (off on Hyprland, §8.14); release workflow with static FFmpeg
+tarballs; split Arch packages. Live: iPhone at ~19-21 ms capture-to-arrival
+p50; the iMac's 220 ms was the sender's 4K software encode plus an
+oldest-frame handoff bug, now e2e p50 55-67 ms (PLAN.md M3). CI: rust on
+x86_64/aarch64, the Arch package with a headless Sway smoke, kde-smoke and
+gnome-smoke (both experimental). Not yet: Android, a real (non-headless)
+Sway/KDE/GNOME session, x86_64 hardware, VA-API, a published release or AUR
+package, the website card.
 
-Open: Mac receiver on the iMac reports ~220 ms e2e at 4096x2304 (cause
-unknown); never run against the Android receiver; never run on x86_64; CLI
-only; no release artifacts (CI only builds); PKGBUILD never executed. Code
-shape: `main.rs` (CLI), `run.rs` (session loop, hard-wired to `HyprlandIpc`),
-`capture.rs`, `hyprland.rs`, `input.rs`, `discover.rs`, `encoder/`. One unit
-test (the output lock). `cargo check` passes on this tree.
-
-Hazard to respect everywhere: Hyprland 0.56.2 aborts in
-`CScreenshareFrame::transform` when an output is reconfigured or removed
-while a capture frame is in flight. The sender joins its capture thread before
-touching the output and holds a per-output `flock`; the trait split below
-makes that ordering structural instead of a convention.
-
-What this Hyprland advertises that matters (*verified* from the 0.56.2 binary's
-interface table; `wayland-info` from `wayland-utils` is not installed, so
-`doctor` should dump the live registry instead): capture
-`ext_image_copy_capture_manager_v1` with `ext_image_copy_capture_cursor_session_v1`,
-`ext_output_image_capture_source_manager_v1`, `zwlr_screencopy_manager_v1`,
-`hyprland_toplevel_export_manager_v1`, `zwp_linux_dmabuf_v1`; input
-`zwlr_virtual_pointer_manager_v1`, `zwp_virtual_keyboard_manager_v1`,
-`hyprland_input_capture_manager_v1`, `wp_pointer_warp_v1`; outputs
-`zwlr_output_manager_v1`, `zwlr_output_power_manager_v1`, `zxdg_output_manager_v1`;
-timing `wp_presentation`, `wp_fifo_manager_v1`, `wp_commit_timing_manager_v1`.
-`zwp_tablet_manager_v2` is there but is a receive-side protocol (no stylus
-injection path), hence the Pencil-to-pointer mapping.
+Hazards (both Hyprland 0.56.2, both handled structurally): output
+reconfigure/removal under an in-flight capture frame (`CapturedDisplay`
+stops and joins capture first; wlr-screencopy for capture, §8.13), and the
+cursor capture session (§8.14). Upstream drafts: `linux/research/`.
 
 ---
 
@@ -127,7 +121,8 @@ od-sender/src/
     hyprland/          today's hyprland.rs (IPC) + HyprlandDisplay (VirtualDisplay impl)
     wlroots/           Sway IPC create/unplug, zwlr_output_manager_v1 sizing, lock-side record; shares wayland/*
     kde/               zkde_screencast_unstable_v1 virtual output + fake input (landed); frames via src/pipewire.rs
-    portal/            later: ashpd ScreenCast(VIRTUAL)+RemoteDesktop, PipeWire frames (GNOME; KDE fallback)
+    gnome/             Mutter ScreenCast.RecordVirtual + RemoteDesktop over D-Bus (no dialog), DisplayConfig for scale/position; frames via src/pipewire.rs
+    portal/            later, Flatpak only: ScreenCast(VIRTUAL)+RemoteDesktop portals, PipeWire remote fd
   wayland/
     registry.rs        one connection + registry snapshot shared by probe, capture, input, cursor
     capture.rs         today's capture.rs: ext-image-copy-capture shm (dmabuf later) -> Frame
@@ -431,7 +426,7 @@ uploads both logs. Jobs are gated on `paths` for their backend directory.
 |---|---|---|---|
 | **Sway, headless** | `archlinux:latest` container on `ubuntu-24.04` (x86_64): `pacman -S sway pixman …`, `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c ci.conf &`, `swaymsg create_output`, `swaymsg output HEADLESS-2 mode --custom 640x480@60Hz`, then `dev smoke --output HEADLESS-2` (Adopt) and, once the backend exists, `--backend wlroots` | **verified** (sway 1.12, aarch64, 2026-10-20) with `linux/testbench/sway-smoke.sh`: `capture-test` + `input-test --output` pass; CI step in `linux.yml` `arch-package` (first run pending) | Ubuntu 24.04's sway 1.9 predates `ext-image-copy-capture` (sway >= 1.10), hence the Arch container, which also matches the AUR target and lets the same job run `makepkg` on the PKGBUILD (exit criterion 4). Exercises `wayland/capture.rs` + `wayland/input.rs` **at beta**, before any Sway backend |
 | **Hyprland, headless** | — | *not feasible* on GPU-less hosted runners (§4.1: allocator needs a DRM fd) | The Hyprland backend's IPC layer gets unit tests against recorded `hyprctl` JSON instead; live coverage is the nested harness here |
-| **Mutter (GNOME), headless** | `ubuntu-24.04`: `apt install mutter xdg-desktop-portal-gnome pipewire`, `mutter --wayland --no-x11 --headless --virtual-monitor 1280x720 &` under a session bus, then `dev smoke --backend portal` | *plausible*: Mutter's headless native backend with `--virtual-monitor` exists since GNOME 40 and has been run on GitHub Actions (Eclipse CBI example); whether the GNOME portal's chooser can be bypassed non-interactively (restore token pre-seeding, or talking to `org.gnome.Mutter.ScreenCast`/`RemoteDesktop` directly in CI) is *unverified* and the main open question for that job | Lands with the portal backend |
+| **Mutter (GNOME), headless** | `archlinux:latest` container: `mutter --headless --wayland --no-x11 --virtual-monitor 1280x800` under its own session bus, PipeWire and `wireplumber --profile policy`, **no system bus** (`DBUS_SYSTEM_BUS_ADDRESS` points nowhere), then `doctor`, `dev smoke --backend gnome` (1170x2532), scale 3→2 with `--position auto-left`, and `kill -9` cleanup; the run is under `strace` and fails on any system-bus connect | **verified locally** (Mutter 51.1, aarch64, `linux/testbench/gnome-smoke.sh`); CI job `gnome-smoke` experimental: first run failed before Mutter (no vgem on the runner kernel), render node now optional | Uses Mutter's private D-Bus APIs, not the portal: no chooser dialog, so it is automatable (`linux/research/gnome-backend.md`) |
 | **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | **verified locally** (KWin 6.8.0 headless on aarch64 with a GPU render node, `linux/testbench/kde-smoke.sh`); CI job `kde-smoke` in `linux.yml` relies on the `vgem` module for a render node on GPU-less runners (*plausible*, experimental, `continue-on-error`) | See the KDE findings below |
 
 **Sway headless findings** (*verified* on sway 1.12 / wlroots 0.20, pixman
@@ -546,6 +541,23 @@ the language makes direct reuse moot. Findings:
 ---
 
 ## 5. Work plan to beta
+
+*Status 2026-10-20:*
+
+| Step | State | Left |
+|---|---|---|
+| 1 Trait split | done | — |
+| 2 Nested harness | done (`testbench/nested.sh`) | — |
+| 3 Protocol catch-up | done: `hello.panel`/`power`, `desktop.rs`, 300 ms debounce | `pencil` → pointer mapping (no-op today); verbatim `hello` log for fixtures |
+| 4 Safety hardening | done: drop order, panics, SIGHUP/SIGTERM, lock per receiver, redial backoff, version gate, `doctor` permission check, removed-output recreation; verified on the nested instance | startup `clean` (a command today); `auto-right` against `auto` monitor rules |
+| 5 Android receiver | not started | all |
+| 6 iMac latency | answered (PLAN.md M3: encode-bound; 55-67 ms p50 after fixes) | hardware encode (#360) |
+| 7 UX | done: `--to`, `list`, `doctor`, `clean`, `dev`, config file, desktop entry, user unit | — |
+| 8 CI: Sway + PKGBUILD | done (`arch-package` job green) | mutation check once |
+| 9 Release pipeline | workflow green on PRs and manual runs; static FFmpeg tarballs | first `linux-v*` tag |
+| 10 AUR package | PKGBUILD split (`opendisplay-sender`) built in CI | publish to the AUR; `makepkg -si`/`namcap` here |
+| 11 Website and docs | `linux/README.md` and the card on `linux/site-beta` | merge it |
+| 12 Beta checklist | — | all |
 
 Each step is small enough to finish in a sitting and ends with a check on this
 machine. Order matters: the refactor comes first so every later step lands in
@@ -678,16 +690,17 @@ with this one machine.
 | Item | Needs | How to test with only this machine |
 |---|---|---|
 | **Adopt / mirror mode as a user feature** (`--output <name>`, §3.7) | Docs, the `panel`-bounds-the-stream rule for mirror, a `list-outputs` helper; the code exists from step 1 | Here, trivially (`--output eDP-1` mirror; `--output` on a `hyprctl output create headless` the user made); niri/COSMIC/river volunteers get support "for free" |
-| **Cursor side channel** (`cursor`/`cursorImg`, UDP §6.3) | `wayland/cursor.rs` on the ext cursor session (Hyprland implements `ext_image_copy_capture_cursor_session_v1`, §2); `SenderSession` already does the UDP/ack dance | iPhone and Mac receiver here; the receiver's overlay shows cursor rate |
-| **Static FFmpeg (§3.5 C)** | `ffmpeg-sys-next` build features in CI, cache, licence note | CI; run the tarball here and in an Ubuntu container |
+| **Cursor side channel** (`cursor`/`cursorImg`, UDP §6.3) | **Landed** (`wayland/cursor.rs`, `--cursor auto|video|off`): the video keeps its cursor until the first sprite arrives. **Off on Hyprland** (§8.14). On GNOME, Mutter's `cursor-mode` metadata would feed it; not wired yet | A compositor with working cursor sessions (Sway: unchecked) |
+| **Static FFmpeg (§3.5 C)** | **Landed** for the release tarballs (`packaging/ffmpeg/build-static.sh`); the AUR package still links the system FFmpeg | First tagged release; run the tarball in an Ubuntu container |
 | **Sway/wlroots backend** | **Landed** (`backend/wlroots`): create/unplug over Sway IPC, size/scale/position through `zwlr_output_manager_v1`, everything else `wayland/*` as-is. CI's headless Sway job runs `dev smoke --backend wlroots`, a full `run --backend wlroots` into `od-receiver --sink none` (~58 fps, e2e p50 ~17 ms at 1024x768 locally) and a `kill -9` + `clean` cycle. Left: a real (DRM) Sway session, other wlroots compositors (no output creation: adopt only) | Nested sway under Hyprland (§4.2) for a GPU-backed run |
 | **KDE backend** | **Landed** (`backend/kde`): `zkde_screencast_unstable_v1` virtual output (v4 `with_description`, v2 fallback), frames from its PipeWire node (`src/pipewire.rs`, shared with the portal backend), input through `org_kde_kwin_fake_input` (no portal, no dialog). Scale and `--position` set through `kde_output_management_v2` like on Hyprland/Sway. Left: a real Plasma session (DRM backend), KWin < 6.8 with the shipped .desktop entry, refresh rates above KWin's fixed 60 Hz (`set_custom_modes`) | Plasma VM or a KDE user; CI `kde-smoke` (§4.3) once vgem is proven |
-| **Portal backend (GNOME)** | `ashpd` ScreenCast `VIRTUAL` + `METADATA` cursor, `pipewire.rs`, RemoteDesktop input, restore tokens. Whether GNOME lets the app choose the virtual monitor's size is *unverified* (KDE does not, §3.2) | GNOME in an aarch64 VM; CI mutter headless job (§4.3) once the dialog question is solved |
+| **GNOME backend** | **Landed** (`backend/gnome`) through Mutter's private ScreenCast/RemoteDesktop D-Bus APIs instead of the portal: no dialog, size via `RecordVirtual` `modes` (Mutter >= 50), scale and position via a temporary `DisplayConfig.ApplyMonitorsConfig` (§8.16), `--cursor off` → hidden. Left: a real GNOME session, Mutter < 50, cursor metadata | Headless Mutter here (`testbench/gnome-smoke.sh`); CI `gnome-smoke` |
+| **Portal backend (Flatpak)** | ScreenCast `VIRTUAL` + RemoteDesktop portals, `PwSource.remote_fd` (untested); the GNOME chooser needs one click per receiver, then a restore token | A GNOME or KDE VM; not automatable headless |
 | **VA-API (Intel/AMD, x86_64)** | `FrameBuf::Dmabuf` via `zwp_linux_dmabuf_v1` + gbm allocation, `Kind::Vaapi` with DRM hwframes (wl-screenrec is the reference); ahead of x264 in auto order; PLAN.md Spike 0 | Not testable here. Needs the Intel Omarchy machine or a volunteer; ship behind `--encoder vaapi` first |
 | **x86_64 confirmation** | nothing new | A volunteer on Omarchy x86_64 running the §1.2 list; CI already builds it and the Arch-container job runs the smoke on x86_64 |
-| **Flatpak** | Only sensible with the portal backend (sandbox has no Hyprland IPC socket by default; `--filesystem=xdg-run/hypr` is possible but ugly) | Defer until the portal backend exists |
+| **Flatpak** | Needs the portal backend (no compositor IPC or private D-Bus API in the sandbox) | Defer until the portal backend exists |
 | **HEVC** | A hardware HEVC encoder (none on Asahi; x265 is too slow) | With VA-API hardware only |
-| **Hyprland upstream** | File the `CScreenshareFrame::transform` abort with a repro (`hyprctl output remove` under an active ext-image-copy-capture session); any screen-share tool can trigger it | Repro on the nested instance (§4.1) |
+| **Hyprland upstream** | Drafts in `linux/research/`: the cursor session always copies an empty sprite (unfixed on main); the `CScreenshareFrame::transform` abort is fixed on main (901881c9f, 212902547) but not in 0.56.2. Filing is the maintainer's call | — |
 
 ---
 
@@ -740,19 +753,19 @@ What that means for `od-sender`, in priority order:
    for generic tarballs after. *Recommend as in §3.5.* Open: package name
    (`opendisplay-sender` vs the existing all-in-one `opendisplay`); *recommend
    the split*.
-3. **Output scale for phones.** Today the output gets `hello.scale` verbatim
-   (3 on an iPhone); the Mac sender uses 2 for anything >= 1.5; the
-   third-party sender derives it from physical DPI. Hyprland renders any of
-   them. *Recommend the Mac rule (2x) by default with `--scale` override, so
-   text size matches what iPhone users of the Mac sender see; verify
-   readability on the phone before deciding.* Left open for the user.
+3. **Output scale for phones.** `--scale passthrough` (default) gives the
+   output the receiver's scale (3 on an iPhone); `--scale mac` uses the Mac
+   sender's 2x rule; a number is fixed. Per desktop: Hyprland and Sway apply
+   it as given; GNOME snaps to the scales Mutter offers for the mode (an
+   iPhone's 3 becomes 2); KDE ignores it and picks from DPI unless the user
+   saved one for that output. *Recommend `mac` as the default once
+   readability on the phone is checked.* Left open for the user.
 4. **Cursor baked into the video at beta.** Cursor moves at video latency
-   and is absent on a static screen until damage. *Recommend accepting it
-   for beta; the side channel is the second post-beta item.*
-5. **Mac receiver in the beta matrix despite the 220 ms question.**
-   *Recommend keeping it "tested" only if step 6 either fixes it or shows it
-   is not the sender's doing; otherwise list it as "works, high latency under
-   investigation".*
+   and is absent on a static screen until damage. The side channel exists
+   but cannot run on Hyprland (§8.14). *Accept for beta.*
+5. **Mac receiver latency — answered.** The 220 ms was the sender's 4K
+   software encode plus an oldest-frame handoff bug; after the fixes e2e
+   p50 is 55-67 ms at 4096x2304. Remaining cost is software encode (#360).
 6. **Hyprland IPC churn** (0.55 broke every `keyword` user). The backend is
    thin and verifies by reading `monitors` back, but a Lua API rename would
    break output creation outright. *Recommend the version gate + `doctor`,
@@ -787,10 +800,10 @@ What that means for `od-sender`, in priority order:
     slower but equally safe. *Recommend trying nested first (step 2) before
     building anything else on it.*
 11. **Third-party sender** (`tixwho/opendisplay-linux`). It covers KDE via
-    portal+libkscreen and Hyprland via the xdph dialog, x86_64 only, and
-    has not moved since August. *Recommend keeping it listed on the website
-    until our KDE path exists, and crediting its KDE findings (§4.4) when we
-    build ours.*
+    portal+libkscreen and Hyprland via the xdph dialog, x86_64 only. Our KDE
+    and GNOME paths now exist without dialogs. *Recommend keeping it listed
+    until ours are verified on real desktops, and crediting its KDE
+    findings (§4.4).*
 12. **KDE path choice — resolved: zkde + fake input.** KWin 6.8 offers both
     globals to every unsandboxed client (sandboxed = systemd unit
     `app-flatpak-*`/`snap.*`; *verified* in `src/wayland_server.cpp` and live).
@@ -800,3 +813,27 @@ What that means for `od-sender`, in priority order:
     source, not live); the package's `od-sender.desktop` now does that with
     `Exec=/usr/bin/od-sender run`. `fake_input.authenticate` always succeeds
     ("TODO: make secure"). No portal, no dialog, no RemoteDesktop.
+13. **Hyprland < 0.57 crashes on ext-image-copy-capture when an output
+    disappears under a frame request.** A race no client can close
+    (`linux/research/hyprland-screenshare-transform.md`); its wlr-screencopy
+    path checks the monitor at every step. `--capture auto` therefore uses
+    wlr-screencopy on Hyprland < 0.57 (or of unknown version); `ext` can be
+    forced. Revisit when Omarchy ships 0.57.
+14. **Cursor side channel off on Hyprland.** Its cursor capture session
+    always copies an empty sprite (unfixed upstream) and, on 0.56.2, a
+    pending cursor frame crashes Hyprland when its output is removed. The
+    Hyprland backend reports no cursor metadata, so the cursor stays in the
+    video. Revisit per Hyprland release.
+15. **Mutter's private D-Bus API.** `org.gnome.Mutter.ScreenCast`/
+    `RemoteDesktop` are internal (gnome-remote-desktop uses them); `Version`
+    has been 4 since Mutter 44, and `modes` arrived in 50 without a version
+    bump. GNOME could restrict them to allow-listed callers as Shell did in
+    41. *Mitigation:* `doctor` prints the API versions; the portal backend
+    is the fallback if access is ever restricted.
+16. **GNOME scale/position touches the real layout.** `ApplyMonitorsConfig`
+    replaces the whole layout, temporarily: every other monitor is passed
+    through from `GetCurrentState` (mode, scale, transform, primary, colour
+    mode, RGB range, underscanning), nothing is saved, and Mutter restores
+    the layout when the virtual monitor goes (*verified* headless). Not yet
+    tried on a real multi-monitor GNOME desktop; mirrored monitors untested.
+    The call is skipped when Mutter's own placement already matches.
