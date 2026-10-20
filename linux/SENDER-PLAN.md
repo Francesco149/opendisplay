@@ -379,7 +379,17 @@ kills the instance on exit. Far end: `od-receiver --sink none --listen
 `kill -9` of the sender, a second sender on the same output, output
 reconfiguration under capture, and the repro for the upstream
 `CScreenshareFrame::transform` report. Worst case is a dead window.
-Caveats: nested is *plausible*, not yet tried; the nested compositor's
+*Verified 2026-10-20 (step 2 done):* `testbench/nested.sh` brings up a
+nested 0.56.2 as a window (`wayland-2`); `od-sender run` against it plus
+`od-receiver --sink none` on loopback created `od-3f31ed` in the nested
+instance only, captured and encoded (x264, IDR delivered). On the nested
+instance: `kill -9` of the sender leaves the output and the next start
+reuses it; an `hl.monitor` mode change under capture and `hyprctl output
+remove` under capture both left Hyprland running (so the Oct 6 abort needs
+more than either alone; the double-sender case is still untested). Bug
+found: after an external `output remove` the sender keeps the connection
+with no output and no video; step 1 must surface "output lost" and
+recreate. Caveats: the nested compositor's
 headless outputs are captured through the same protocols, so the test is
 representative for IPC, capture and input, but not for DRM timing.
 
@@ -681,7 +691,7 @@ What that means for `od-sender`, in priority order:
 9. **Receiver-side bugs found in step 5** (Android) may need app releases
    that are not in our hands here. *Recommend filing them and shipping the
    beta with "Android: works with app version >= X" wording.*
-10. **Nested Hyprland is plausible, not proven.** If it does not come up
+10. **Nested Hyprland — resolved, it works (§4.1).** Had it not come up
     (DRM backend grabbing the seat, allocator trouble through the parent),
     the fallback is an aarch64 VM with Omarchy as in PLAN.md §1, which is
     slower but equally safe. *Recommend trying nested first (step 2) before
