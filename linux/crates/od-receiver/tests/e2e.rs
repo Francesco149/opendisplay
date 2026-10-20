@@ -121,6 +121,10 @@ async fn decodes_with_fakesink_when_a_decoder_is_installed() {
     o.switch_clip = Some(testdata("clip-640x360-30.h264"));
     o.switch_at = Some(Duration::from_millis(900));
     let s = od_fake_sender::run(o).await.unwrap();
+    // The sender returns once its last frame is written; let the receiver
+    // read it before stopping, or the count below is one short (seen on the
+    // aarch64 runner: 120 of 121).
+    tokio::time::sleep(Duration::from_millis(300)).await;
     stop.send(true).unwrap();
     let report = task.await.unwrap().unwrap();
     assert!(s.frames_sent >= 90, "{s:?}");

@@ -122,7 +122,7 @@ jobs:
           bin=target/release/od-sender
           "$bin" --version
           for enc in x264 openh264 auto; do
-            "$bin" encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
+            "$bin" dev encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
           done
 
       - name: Package
@@ -184,7 +184,7 @@ jobs:
 
           **Arch Linux / Omarchy:** \`yay -S opendisplay-sender\` (AUR; builds against your system FFmpeg and gets updates through your AUR helper).
 
-          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed. Unpack, put \`od-sender\` on your \`PATH\`, and run \`od-sender run\`. Each tarball also has a desktop entry, a \`systemd --user\` template unit, the license (GPL-3.0; this build includes GPL x264), and \`PROTOCOL.md\`.
+          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed. Unpack, put \`od-sender\` on your \`PATH\`, and run \`od-sender run\`. Each tarball also has a desktop entry, a \`systemd --user\` template unit, the license (GPL-3.0; this build includes GPL x264), and \`PROTOCOL.md\`.
 
           Linked-in sources: FFmpeg [${ffmpeg_tag}](https://github.com/FFmpeg/FFmpeg/tree/${ffmpeg_tag}) and x264 [${x264_commit:0:7}](https://code.videolan.org/videolan/x264/-/tree/${x264_commit}), configured by [\`build-static.sh\`](https://github.com/${GH_REPO}/blob/${TAG}/${script}).
 
