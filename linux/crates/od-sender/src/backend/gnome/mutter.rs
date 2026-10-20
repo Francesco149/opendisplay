@@ -187,7 +187,9 @@ async fn start_and_wait_for_node(
                 return Ok(node);
             }
         }
-        Err(anyhow!("the session bus closed before Mutter announced the stream"))
+        Err(anyhow!(
+            "the session bus closed before Mutter announced the stream"
+        ))
     };
     let timeout = async {
         async_io::Timer::after(within).await;
