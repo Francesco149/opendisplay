@@ -811,8 +811,37 @@ async fn apply<S: AsyncWrite + Unpin>(
     cursor: Option<&mpsc::UnboundedSender<CursorEvent>>,
 ) -> Result<()> {
     info!("plan: {}", target.plan);
+    let position = target.spec.position;
     let plan = build(backend, active, target, opts, cursor)?;
+    if let (Some(a), Some(h)) = (active.as_ref(), sess.hello()) {
+        info!(
+            "{}",
+            extending_line(&receiver_label(h), a.display.info(), position)
+        );
+    }
     send_stream_config(stream, sess, &plan).await
+}
+
+/// The one plain-language line a user looks for after `run`.
+fn extending_line(receiver: &str, info: &DisplayInfo, position: Position) -> String {
+    let scale = info.scale.max(0.1);
+    let (lw, lh) = (
+        (info.width as f64 / scale).round(),
+        (info.height as f64 / scale).round(),
+    );
+    let place = match position {
+        Position::AutoRight => "right of your other displays".to_string(),
+        Position::AutoLeft => "left of your other displays".to_string(),
+        Position::AutoUp => "above your other displays".to_string(),
+        Position::AutoDown => "below your other displays".to_string(),
+        Position::At(x, y) => format!("at {x},{y}"),
+    };
+    let scale = format!("{:.2}", info.scale);
+    let scale = scale.trim_end_matches('0').trim_end_matches('.');
+    format!(
+        "Extending onto {receiver}: {lw}x{lh} logical at {scale}x ({}, {place}). Ctrl+C to stop.",
+        info.name
+    )
 }
 
 async fn session<S: AsyncRead + AsyncWrite + Unpin>(
@@ -1813,6 +1842,33 @@ mod tests {
         forget_lock(&name);
         assert_eq!(*shared.painted.lock().unwrap(), Some(true));
         assert!(!shared.entries().iter().any(|l| l == "start_cursor"));
+    }
+
+    #[test]
+    fn the_success_line_reads_plainly() {
+        let info = DisplayInfo {
+            name: "od-1f046d".into(),
+            width: 4096,
+            height: 2304,
+            refresh_hz: 60.0,
+            scale: 2.0,
+            x: 0,
+            y: 0,
+        };
+        assert_eq!(
+            extending_line("iMac (1F04…)", &info, Position::AutoLeft),
+            "Extending onto iMac (1F04…): 2048x1152 logical at 2x (od-1f046d, left of your other displays). Ctrl+C to stop."
+        );
+        let frac = DisplayInfo {
+            scale: 2.6666667,
+            width: 2424,
+            height: 1080,
+            ..info
+        };
+        assert!(
+            extending_line("Pixel", &frac, Position::At(10, 20))
+                .contains("909x405 logical at 2.67x (od-1f046d, at 10,20)")
+        );
     }
 
     #[test]

@@ -4,14 +4,18 @@
 # Names with spaces or slashes need escaping: `systemd-escape 'Pixel 8'`.
 # Override arguments with `systemctl --user edit od-sender@.service`.
 [Unit]
-Description=OpenDisplay sender to %I
+Description=OpenDisplay Linux sender to %I
 PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-ExecStart=/usr/bin/od-sender run --to %I
+# --wait: keep looking until the receiver is on the network (phone asleep,
+# app closed) instead of failing every 10 s and filling the journal.
+ExecStart=/usr/bin/od-sender run --to %I --wait
 Restart=on-failure
-RestartSec=5
+RestartSec=15
+# 2: unsupported desktop or broken config; restarting will not fix either.
+RestartPreventExitStatus=2
 
 [Install]
 WantedBy=graphical-session.target
