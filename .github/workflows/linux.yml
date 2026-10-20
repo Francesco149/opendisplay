@@ -114,11 +114,25 @@ jobs:
           # .SRCINFO is what the AUR shows; it must match the PKGBUILD.
           sudo -u builder makepkg --printsrcinfo | diff -u .SRCINFO -
 
-      # TODO(SENDER-PLAN step 8): headless sway smoke against the package.
-      #   pacman -S sway; WLR_BACKENDS=headless WLR_RENDERER=pixman
-      #   WLR_LIBINPUT_NO_DEVICES=1 dbus-run-session sway -c ci.conf &
-      #   swaymsg create_output; swaymsg output HEADLESS-2 mode --custom 640x480@60Hz
-      #   od-receiver --listen 127.0.0.1:9100 --sink none &   (from the workspace)
-      #   timeout 60 /usr/bin/od-sender dev smoke --output HEADLESS-2 \
-      #     --connect 127.0.0.1:9100 --size 640x480 --frames 30
-      # and upload both logs. Waits for `od-sender dev smoke` (step 1).
+      # The packaged /usr/bin/od-sender on a headless Sway (wlroots, pixman,
+      # no GPU): capture via ext-image-copy-capture, input via
+      # zwlr_virtual_pointer_v1 on an output sized through
+      # zwlr_output_manager_v1. See linux/testbench/sway-smoke.sh.
+      - name: Install package and Sway
+        working-directory: linux/packaging/arch/opendisplay-sender
+        run: |
+          pacman -U --noconfirm opendisplay-sender-[0-9]*.pkg.tar.*
+          pacman -S --noconfirm --needed sway foot wlr-randr jq
+
+      - name: Sway headless smoke
+        run: |
+          install -d -o builder "$RUNNER_TEMP/sway-smoke"
+          sudo -u builder -H env LANG=C.UTF-8 \
+            timeout 120 linux/testbench/sway-smoke.sh /usr/bin/od-sender "$RUNNER_TEMP/sway-smoke"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sway-smoke-logs
+          path: ${{ runner.temp }}/sway-smoke
+          if-no-files-found: ignore
