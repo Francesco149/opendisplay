@@ -874,6 +874,20 @@ mod tests {
         assert_eq!((p.output.hz, p.stream.fps), (60, 60));
     }
 
+    /// After the next bump a receiver may send only `panel` (§6.1).
+    #[test]
+    fn a_panel_only_hello_plans_from_the_panel() {
+        let mut h = fixture!("iphone-15-pro-portrait");
+        let with_legacy = plan(&h, &PASS).unwrap();
+        (h.pixels_wide, h.pixels_high, h.scale) = (0, 0, 0.0);
+        assert_eq!(plan(&h, &PASS).unwrap(), with_legacy);
+        h.panel = None;
+        assert!(matches!(
+            plan(&h, &PASS),
+            Err(PlanError::InvalidSize { .. })
+        ));
+    }
+
     #[test]
     fn video_caps_without_h264_is_an_error() {
         let mut h = fixture!("ipad-pro-12.9");
