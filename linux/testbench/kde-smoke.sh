@@ -22,7 +22,9 @@
 # 3. `run --backend kde` into `od-receiver --sink none`: the receiver's
 #    1024x768 scale-2 hello gives a 1024x768 output at scale 2 (set through
 #    kde_output_management_v2) and a 1024x768 stream.
-# 4. Crash: `kill -9` a running sender; KWin drops its output by itself.
+# 4. Crash: `kill -9` a sender placed auto-left; KWin drops its output and
+#    moves the user's output back by itself; `od-sender clean` then has
+#    nothing to undo.
 set -euo pipefail
 
 if [ -z "${OD_KDE_INNER:-}" ]; then
@@ -133,6 +135,44 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   grep -q "streamConfig h264 1024x768" "$logdir/receiver.log" ||
     { echo "receiver saw no 1024x768 streamConfig"; exit 1; }
 
+  echo "--- crash (during an auto-left placement) and clean"
+  "$sender" run --to "127.0.0.1:$port" --backend kde --duration 30 --position auto-left \
+    > "$logdir/crash.log" 2>&1 &
+  run_pid=$!
+  # Kill only once the placement (and the shift of Virtual-0) is applied.
+  made=
+  for _ in $(seq 100); do
+    made="$(sed -n 's/.*virtual display \(Virtual-od-[0-9a-f]*\) = .*/\1/p' "$logdir/crash.log" | head -1)"
+    [ -n "$made" ] && break
+    sleep 0.1
+  done
+  [ -n "$made" ] || { cat "$logdir/crash.log"; echo "the sender made no output"; exit 1; }
+  kill -9 "$run_pid"
+  wait "$run_pid" 2>/dev/null || true
+  gone=
+  for _ in $(seq 30); do
+    outputs | grep -x "$made" >/dev/null || { gone=1; break; }
+    sleep 0.1
+  done
+  [ -n "$gone" ] || { echo "$made outlived its sender"; exit 1; }
+  echo "KWin dropped $made with its sender"
+  # KWin 6.8 moves Virtual-0 back by itself when a client dies (verified:
+  # within 0.3 s). `clean` is the safety net where a KWin does not; here it
+  # must find nothing to undo and leave the layout alone. (A lone offset
+  # output cannot be staged: KWin and kscreen-doctor normalise it to 0,0.)
+  back=
+  for _ in $(seq 40); do
+    layout="$("$sender" doctor 2>/dev/null || true)"
+    grep -q "^  output Virtual-0 .* at 0,0$" <<< "$layout" && { back=1; break; }
+    sleep 0.05
+  done
+  [ -n "$back" ] || { echo "$layout"; echo "Virtual-0 still shifted after the crash"; exit 1; }
+  echo "KWin moved Virtual-0 back to 0,0 after the crash"
+  "$sender" clean --backend kde 2>&1 | tee "$logdir/clean.log"
+  grep -q "nothing to clean" "$logdir/clean.log" || { echo "clean changed an unshifted layout"; exit 1; }
+  layout="$("$sender" doctor 2>/dev/null || true)"
+  grep -q "^  output Virtual-0 .* at 0,0$" <<< "$layout" || { echo "$layout"; echo "clean moved Virtual-0"; exit 1; }
+
   echo "--- run --position auto-left"
   # KWin refuses negative positions, so the existing output moves right;
   # after the sender exits it is back at 0,0.
@@ -153,25 +193,6 @@ if [ -n "${OD_RECEIVER:-}" ]; then
   [ -n "$back" ] || { "$sender" doctor; echo "Virtual-0 not back at 0,0"; exit 1; }
   echo "Virtual-0 is back at 0,0"
 
-  echo "--- crash"
-  "$sender" run --to "127.0.0.1:$port" --backend kde --duration 30 > "$logdir/crash.log" 2>&1 &
-  run_pid=$!
-  made=
-  for _ in $(seq 100); do
-    made="$(outputs | grep '^Virtual-od-' || true)"
-    [ -n "$made" ] && break
-    sleep 0.1
-  done
-  [ -n "$made" ] || { cat "$logdir/crash.log"; echo "the sender made no output"; exit 1; }
-  kill -9 "$run_pid"
-  wait "$run_pid" 2>/dev/null || true
-  gone=
-  for _ in $(seq 30); do
-    outputs | grep -x "$made" >/dev/null || { gone=1; break; }
-    sleep 0.1
-  done
-  [ -n "$gone" ] || { echo "$made outlived its sender"; exit 1; }
-  echo "KWin dropped $made with its sender"
 else
   echo "--- OD_RECEIVER not set: skipping the streaming and crash steps"
 fi
