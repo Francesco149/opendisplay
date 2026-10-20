@@ -6,8 +6,9 @@
 //! frame on an M1 Pro, a third of the 4K encode. Bands start on even rows
 //! (multiples of 16), and the area filter averages each 2x2 chroma block
 //! from its own rows only, so the banded output is byte-identical to one
-//! context over the whole frame. Bilinear is not: its chroma taps reach into
-//! the neighbouring band.
+//! context over the whole frame (with accurate rounding, see
+//! `new_context`). Bilinear is not: its chroma taps reach into the
+//! neighbouring band.
 
 use std::thread;
 
@@ -188,7 +189,12 @@ fn new_context(width: u32, rows: u32, format: Pixel) -> Result<*mut ff::ffi::Sws
             width as i32,
             rows as i32,
             format.into(),
-            ff::software::scaling::Flags::AREA.bits() as _,
+            // ACCURATE_RND: x86's approximate SIMD vertical filter rounds a
+            // context's interior rows differently from its last row (C), so
+            // without it the last chroma row of each band came out up to one
+            // level off a single context's (aarch64 is exact either way).
+            (ff::software::scaling::Flags::AREA | ff::software::scaling::Flags::ACCURATE_RND).bits()
+                as _,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null(),
