@@ -112,12 +112,31 @@ fn now(start: Instant) -> Now {
 }
 
 /// The output for a receiver with this `hello.id` (equal to its Bonjour TXT
-/// `id`, PROTOCOL §2.1): `od-<first 6 chars>`; also the lock key.
+/// `id`, PROTOCOL §2.1): `od-<first 6 chars>`; also the lock key. The id is
+/// receiver-supplied and the name reaches compositor IPC, Lua and a file
+/// path, so an id whose first 6 characters are not all `[a-z0-9]` (after
+/// lower-casing) is named by a hash of the whole id instead.
 pub fn output_name(id: Option<&str>) -> String {
-    let short = id
-        .map(|s| s.chars().take(6).collect::<String>().to_lowercase())
-        .unwrap_or_else(|| "anon".into());
-    format!("od-{short}")
+    let Some(id) = id.filter(|s| !s.is_empty()) else {
+        return "od-anon".into();
+    };
+    let short: String = id.chars().take(6).collect::<String>().to_lowercase();
+    let plain = short.len() == 6
+        && short
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if plain {
+        format!("od-{short}")
+    } else {
+        format!("od-{:06x}", fnv1a(id.as_bytes()) & 0xff_ffff)
+    }
+}
+
+/// 32-bit FNV-1a; stable across builds, unlike `DefaultHasher`.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |h, &b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// What a `hello` asks the backend for: the desktop plan plus where and
@@ -1121,6 +1140,39 @@ mod tests {
     use super::*;
     use crate::backend::{BackendId, Caps};
 
+    #[test]
+    fn output_names_are_safe_for_ipc_lua_and_paths() {
+        // A UUID keeps its readable prefix, as before.
+        assert_eq!(
+            output_name(Some("3F31ED2A-0C1B-4D6E-9F00-123456789ABC")),
+            "od-3f31ed"
+        );
+        assert_eq!(output_name(None), "od-anon");
+        assert_eq!(output_name(Some("")), "od-anon");
+        for hostile in [
+            "\"})--x",
+            "a b c d e f",
+            "../../x",
+            "ab\ncd\nef",
+            "ÄÖÜäöü",
+            "abc",
+        ] {
+            let n = output_name(Some(hostile));
+            let suffix = n.strip_prefix("od-").unwrap();
+            assert_eq!(suffix.len(), 6, "{hostile:?} -> {n}");
+            assert!(
+                suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "{hostile:?} -> {n}"
+            );
+        }
+        // Stable across runs and builds (the lock key depends on it), and
+        // ids differing after the prefix are told apart when hashed.
+        assert_eq!(output_name(Some("a b c")), output_name(Some("a b c")));
+        assert_ne!(output_name(Some("a b c1")), output_name(Some("a b c2")));
+    }
+
     fn opts() -> RunOptions {
         RunOptions {
             bitrate_mbps: 20.0,
@@ -1331,7 +1383,7 @@ mod tests {
     /// in parallel. Returns the hello and the output name.
     fn test_hello(tag: &str) -> (Hello, String) {
         let id = format!("{tag}{:06x}-test", std::process::id());
-        let name = format!("od-{}", &id[..6]);
+        let name = output_name(Some(&id));
         (
             Hello {
                 id: Some(id),

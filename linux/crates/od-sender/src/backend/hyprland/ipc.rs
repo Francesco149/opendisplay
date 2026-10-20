@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tracing::warn;
 
+use super::workspace::lua_str;
 use crate::backend::Position;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -188,7 +189,8 @@ impl HyprlandIpc {
     ) -> Result<Monitor> {
         let position = position_spec(position);
         let lua = format!(
-            "hl.monitor({{output=\"{name}\", mode=\"{width}x{height}@{hz}\", position=\"{position}\", scale={scale}}})"
+            "hl.monitor({{output={}, mode=\"{width}x{height}@{hz}\", position=\"{position}\", scale={scale}}})",
+            lua_str(name)
         );
         let r = self.request(&format!("eval {lua}"))?;
         if r.trim() != "ok" {
