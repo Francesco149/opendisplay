@@ -1,4 +1,5 @@
 mod backend;
+mod config;
 mod desktop;
 mod dev;
 mod discover;
@@ -28,6 +29,9 @@ struct Args {
     /// HYPRLAND_INSTANCE_SIGNATURE and WAYLAND_DISPLAY for this process.
     #[arg(long, global = true, value_name = "SIG|INDEX")]
     instance: Option<String>,
+    /// Config file; default `$XDG_CONFIG_HOME/opendisplay/sender.toml`.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -67,28 +71,31 @@ enum Cmd {
         /// Only accept a discovered receiver whose name contains this (same as `--to <name>`).
         #[arg(long, hide = true, conflicts_with_all = ["to", "connect"])]
         name: Option<String>,
-        #[arg(long, default_value_t = 20.0)]
-        bitrate_mbps: f32,
+        /// Target bitrate [default: 20, or the config file's].
+        #[arg(long)]
+        bitrate_mbps: Option<f32>,
         /// Frame-rate cap; default: the receiver's `displayMaxFrameRate`
         /// (120 on ProMotion), never above it.
         #[arg(long)]
         max_fps: Option<f32>,
         /// Output scale: `passthrough` (the receiver's own scale), `mac`
-        /// (2 for Retina-class panels, else 1, like the Mac sender) or a number.
-        #[arg(long, default_value = "passthrough")]
-        scale: desktop::ScalePolicy,
-        /// H.264 encoder backend (#360).
-        #[arg(long, value_enum, default_value_t = encoder::Backend::Auto)]
-        encoder: encoder::Backend,
+        /// (2 for Retina-class panels, else 1, like the Mac sender) or a
+        /// number [default: passthrough, or the config file's].
+        #[arg(long)]
+        scale: Option<desktop::ScalePolicy>,
+        /// H.264 encoder backend (#360) [default: auto, or the config file's].
+        #[arg(long, value_enum)]
+        encoder: Option<encoder::Backend>,
         /// Encoder threads (0 = all cores).
         #[arg(long, default_value_t = 0)]
         threads: u16,
         /// Do not bake the cursor into the video.
         #[arg(long)]
         no_cursor: bool,
-        /// Position of the virtual output: auto-right, auto-left, auto-up, auto-down, or "x,y".
-        #[arg(long, default_value = "auto-right")]
-        position: Position,
+        /// Position of the virtual output: auto-right, auto-left, auto-up,
+        /// auto-down, or "x,y" [default: auto-right, or the config file's].
+        #[arg(long)]
+        position: Option<Position>,
         /// Leave the virtual output in place when the sender exits (development).
         #[arg(long)]
         keep_output: bool,
@@ -161,6 +168,17 @@ fn resolve_receiver(
     })
 }
 
+/// The config file: `--config` (must exist) or the default path (optional).
+fn load_config(explicit: Option<&std::path::Path>) -> Result<config::Config> {
+    match explicit {
+        Some(p) => config::Config::load(p, true),
+        None => match config::default_path() {
+            Some(p) => config::Config::load(&p, false),
+            None => Ok(config::Config::default()),
+        },
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -209,6 +227,18 @@ fn real_main() -> Result<i32> {
             duration,
             backend,
         } => {
+            let config = load_config(args.config.as_deref())?;
+            let cli = config::Layer {
+                position,
+                scale,
+                bitrate_mbps,
+            };
+            let eff = cli.over(&config.defaults).over(&config::builtin());
+            let to = to.or_else(|| {
+                (connect.is_none() && name.is_none())
+                    .then(|| config.to.clone())
+                    .flatten()
+            });
             let mut backend = detect::detect(&backend.request())?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
@@ -217,17 +247,22 @@ fn real_main() -> Result<i32> {
                     receiver.addr,
                     backend.as_mut(),
                     session::RunOptions {
-                        bitrate_mbps,
-                        desktop: desktop::DesktopOptions { scale, max_fps },
+                        bitrate_mbps: eff.bitrate_mbps.unwrap_or(20.0),
+                        desktop: desktop::DesktopOptions {
+                            scale: eff.scale.unwrap_or_default(),
+                            max_fps: max_fps.or(config.max_fps),
+                        },
                         threads: dev::threads_or_all(threads),
-                        encoder,
-                        cursor_in_video: !no_cursor,
-                        position,
+                        encoder: encoder.or(config.encoder).unwrap_or(encoder::Backend::Auto),
+                        cursor_in_video: !no_cursor && config.cursor.unwrap_or(true),
+                        position: eff.position.unwrap_or(Position::AutoRight),
                         keep_output,
                         reconnect: !no_reconnect,
                         duration: duration.map(Duration::from_secs_f64),
                         receiver_id: receiver.id,
                         receiver_name: receiver.name,
+                        cli,
+                        config,
                     },
                 )
                 .await
@@ -239,18 +274,25 @@ fn real_main() -> Result<i32> {
                 println!("no receivers found");
                 return Ok(1);
             }
+            let w = found
+                .iter()
+                .map(|f| f.instance.len())
+                .max()
+                .unwrap_or(4)
+                .max(4);
+            println!("{:w$}  {:21}  pv  id", "name", "address");
             for f in found {
                 println!(
-                    "{}\t{}\tpv {}\tid {}",
+                    "{:w$}  {:21}  {:<2}  {}",
                     f.instance,
-                    f.addr,
+                    f.addr.to_string(),
                     f.pv,
                     f.id.as_deref().unwrap_or("-")
                 );
             }
         }
         Cmd::Doctor { backend } => {
-            if !doctor::doctor(&backend.request()) {
+            if !doctor::doctor(&backend.request(), args.config.as_deref()) {
                 return Ok(detect::EXIT_UNSUPPORTED);
             }
         }

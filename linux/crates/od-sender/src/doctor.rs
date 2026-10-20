@@ -1,17 +1,19 @@
 //! `od-sender doctor`: what the sender would use on this desktop and why
 //! (SENDER-PLAN §3.3). Read-only: it creates no output and takes no lock.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::backend::detect::{self, Decision, Environment, Request};
 use crate::backend::hyprland::{self, instance, ipc::HyprlandIpc};
 use crate::backend::lock;
+use crate::config::{self, Config, Layer};
 use crate::encoder;
 use crate::wayland::registry::{self, INTERESTING};
 
 /// Prints the report; returns `false` on an unsupported desktop.
-pub fn doctor(req: &Request) -> bool {
+pub fn doctor(req: &Request, config_path: Option<&Path>) -> bool {
     println!("od-sender {}", env!("CARGO_PKG_VERSION"));
+    let config_ok = config_report(config_path);
     let env = Environment::from_process();
 
     let snapshot = env.wayland_display.as_ref().map(|_| registry::snapshot());
@@ -121,7 +123,72 @@ pub fn doctor(req: &Request) -> bool {
             println!("  {}", e.file_name().to_string_lossy());
         }
     }
-    supported
+    supported && config_ok
+}
+
+fn layer_line(l: &Layer) -> String {
+    let mut parts = Vec::new();
+    if let Some(p) = l.position {
+        parts.push(format!("position {p:?}"));
+    }
+    if let Some(s) = l.scale {
+        parts.push(format!("scale {s:?}"));
+    }
+    if let Some(b) = l.bitrate_mbps {
+        parts.push(format!("bitrate-mbps {b}"));
+    }
+    if parts.is_empty() {
+        "(nothing)".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Prints where the config comes from and what it sets; `false` when it
+/// does not parse (`run` would refuse it).
+fn config_report(explicit: Option<&Path>) -> bool {
+    let (path, required) = match explicit {
+        Some(p) => (Some(p.to_path_buf()), true),
+        None => (config::default_path(), false),
+    };
+    println!("\nconfig:");
+    let Some(path) = path else {
+        println!("  no path (neither XDG_CONFIG_HOME nor HOME set)");
+        return true;
+    };
+    let exists = path.exists();
+    println!(
+        "  {} ({})",
+        path.display(),
+        if exists {
+            "found"
+        } else {
+            "absent: built-in defaults"
+        }
+    );
+    match Config::load(&path, required) {
+        Ok(c) => {
+            if exists {
+                let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+                println!("  to {}", opt(c.to.clone()));
+                println!("  {}", layer_line(&c.defaults));
+                println!(
+                    "  max-fps {}, encoder {}, cursor {}",
+                    opt(c.max_fps.map(|f| f.to_string())),
+                    opt(c.encoder.map(|e| format!("{e:?}"))),
+                    opt(c.cursor.map(|b| b.to_string()))
+                );
+                for (k, l) in &c.receivers {
+                    println!("  [receiver.\"{k}\"] {}", layer_line(l));
+                }
+            }
+            true
+        }
+        Err(e) => {
+            println!("  error: {e:#}");
+            false
+        }
+    }
 }
 
 fn hyprland_report(socket: PathBuf) -> bool {

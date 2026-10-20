@@ -23,6 +23,7 @@ use crate::backend::{
     Backend, CaptureEvent, CaptureOptions, DisplayInfo, DisplaySpec, Frame, FrameSink, InputSink,
     Position, VirtualDisplay,
 };
+use crate::config::{self, Config, Layer};
 use crate::desktop::{self, Debounce, DesktopOptions, DesktopPlan, PlanError, StreamPlan};
 use crate::encoder::{Encoded, Encoder, EncoderSettings};
 use crate::latest;
@@ -47,6 +48,35 @@ pub struct RunOptions {
     pub receiver_id: Option<String>,
     /// How the receiver is named in messages before its `hello` arrives.
     pub receiver_name: String,
+    /// What the command line set explicitly; wins over the config file.
+    pub cli: Layer,
+    /// The config file, for `[receiver."…"]` overrides.
+    pub config: Config,
+}
+
+impl RunOptions {
+    /// These options with the config file's table for this receiver applied
+    /// under the command line. `keys`: id, Bonjour name, device name.
+    pub fn for_receiver(&self, keys: &[Option<&str>]) -> RunOptions {
+        let Some((key, o)) = self.config.receiver(keys) else {
+            return self.clone();
+        };
+        debug!("config: [receiver.\"{key}\"] applies");
+        let eff = self
+            .cli
+            .over(o)
+            .over(&self.config.defaults)
+            .over(&config::builtin());
+        RunOptions {
+            position: eff.position.unwrap_or(self.position),
+            bitrate_mbps: eff.bitrate_mbps.unwrap_or(self.bitrate_mbps),
+            desktop: DesktopOptions {
+                scale: eff.scale.unwrap_or(self.desktop.scale),
+                ..self.desktop
+            },
+            ..self.clone()
+        }
+    }
 }
 
 fn now(start: Instant) -> Now {
@@ -137,6 +167,31 @@ impl LossBudget {
     }
 }
 
+/// Spawn a pipeline thread whose panic is reported on `lost` like a lost
+/// display, so the session rebuilds (or gives up) instead of waiting on a
+/// channel nobody feeds.
+fn spawn_reporting_panics(
+    name: &str,
+    lost: mpsc::UnboundedSender<String>,
+    f: impl FnOnce() + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    struct Report(String, mpsc::UnboundedSender<String>);
+    impl Drop for Report {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let _ = self.1.send(format!("{} thread panicked", self.0));
+            }
+        }
+    }
+    let report = Report(name.to_string(), lost);
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _report = report;
+            f();
+        })
+}
+
 /// Encoder thread fed by a capture [`FrameSink`]: latest frame wins, rate
 /// capped, last frame replayed as an IDR on a static screen (§5.3).
 struct EncodePipeline {
@@ -157,89 +212,87 @@ impl EncodePipeline {
         let (lost_tx, lost_rx) = mpsc::unbounded_channel();
         let enc_stop = stop.clone();
         let enc_force = force_idr.clone();
-        std::thread::Builder::new()
-            .name("encode".into())
-            .spawn(move || {
-                let mut encoder: Option<Encoder> = None;
-                let mut last: Option<Frame> = None;
-                // Newest captured frame not yet encoded. A frame that arrives
-                // inside the rate cap waits here for its slot rather than
-                // being dropped: on a screen that then goes static it is the
-                // last picture, and no further damage would ever replace it.
-                let mut pending: Option<Frame> = None;
-                let min_interval = Duration::from_secs_f32(1.0 / settings.max_fps.max(1.0));
-                // The cap is measured between encode starts, so encode time
-                // counts towards the interval instead of adding to it.
-                let mut last_start = Instant::now() - min_interval;
-                while !enc_stop.load(Ordering::Relaxed) {
-                    let timeout = if pending.is_some() {
-                        min_interval.saturating_sub(last_start.elapsed())
-                    } else {
-                        Duration::from_millis(100)
-                    };
-                    match raw_rx.recv_timeout(timeout) {
-                        Ok(f) => pending = Some(f),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(_) => break,
+        spawn_reporting_panics("encode", lost_tx.clone(), move || {
+            let mut encoder: Option<Encoder> = None;
+            let mut last: Option<Frame> = None;
+            // Newest captured frame not yet encoded. A frame that arrives
+            // inside the rate cap waits here for its slot rather than
+            // being dropped: on a screen that then goes static it is the
+            // last picture, and no further damage would ever replace it.
+            let mut pending: Option<Frame> = None;
+            let min_interval = Duration::from_secs_f32(1.0 / settings.max_fps.max(1.0));
+            // The cap is measured between encode starts, so encode time
+            // counts towards the interval instead of adding to it.
+            let mut last_start = Instant::now() - min_interval;
+            while !enc_stop.load(Ordering::Relaxed) {
+                let timeout = if pending.is_some() {
+                    min_interval.saturating_sub(last_start.elapsed())
+                } else {
+                    Duration::from_millis(100)
+                };
+                match raw_rx.recv_timeout(timeout) {
+                    Ok(f) => pending = Some(f),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => break,
+                }
+                let frame = if pending.is_some() {
+                    if last_start.elapsed() < min_interval {
+                        continue;
                     }
-                    let frame = if pending.is_some() {
-                        if last_start.elapsed() < min_interval {
+                    pending.take().unwrap()
+                } else if enc_force.load(Ordering::Relaxed) && last.is_some() {
+                    // Static screen and an IDR was asked for: replay (§5.3).
+                    last.take().unwrap()
+                } else {
+                    continue;
+                };
+                last_start = Instant::now();
+                let (w, h) = frame.dimensions();
+                if encoder
+                    .as_ref()
+                    .is_none_or(|e| e.dimensions() != (w & !1, h & !1))
+                {
+                    match Encoder::new(w, h, settings) {
+                        Ok(e) => {
+                            info!(
+                                "encoder: {} {}x{} {:.1} Mbit/s, {} threads",
+                                e.label(),
+                                w & !1,
+                                h & !1,
+                                settings.bitrate_bps as f64 / 1e6,
+                                settings.threads
+                            );
+                            // A resize reopens the same backend without probing.
+                            settings.backend = e.backend();
+                            encoder = Some(e);
+                            enc_force.store(true, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            warn!("encoder init failed: {e:#}");
                             continue;
                         }
-                        pending.take().unwrap()
-                    } else if enc_force.load(Ordering::Relaxed) && last.is_some() {
-                        // Static screen and an IDR was asked for: replay (§5.3).
-                        last.take().unwrap()
-                    } else {
-                        continue;
-                    };
-                    last_start = Instant::now();
-                    let (w, h) = frame.dimensions();
-                    if encoder
-                        .as_ref()
-                        .is_none_or(|e| e.dimensions() != (w & !1, h & !1))
-                    {
-                        match Encoder::new(w, h, settings) {
-                            Ok(e) => {
-                                info!(
-                                    "encoder: {} {}x{} {:.1} Mbit/s, {} threads",
-                                    e.label(),
-                                    w & !1,
-                                    h & !1,
-                                    settings.bitrate_bps as f64 / 1e6,
-                                    settings.threads
-                                );
-                                // A resize reopens the same backend without probing.
-                                settings.backend = e.backend();
-                                encoder = Some(e);
-                                enc_force.store(true, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                warn!("encoder init failed: {e:#}");
-                                continue;
-                            }
-                        }
                     }
-                    let force = enc_force.swap(false, Ordering::Relaxed);
-                    match encoder.as_mut().unwrap().encode(&frame, force) {
-                        Ok(units) => {
-                            if force && !units.iter().any(|u| u.unit.is_idr) {
-                                warn!("encoder ignored the IDR request");
-                                enc_force.store(true, Ordering::Relaxed);
-                            }
-                            if units
-                                .into_iter()
-                                .any(|enc| encoded_tx.blocking_send(enc).is_err())
-                            {
-                                break;
-                            }
-                        }
-                        Err(e) => warn!("encode failed: {e:#}"),
-                    }
-                    last = Some(frame);
                 }
-                debug!("encoder thread done");
-            })?;
+                let force = enc_force.swap(false, Ordering::Relaxed);
+                match encoder.as_mut().unwrap().encode(&frame, force) {
+                    Ok(units) => {
+                        if force && !units.iter().any(|u| u.unit.is_idr) {
+                            warn!("encoder ignored the IDR request");
+                            enc_force.store(true, Ordering::Relaxed);
+                        }
+                        if units
+                            .into_iter()
+                            .any(|enc| encoded_tx.blocking_send(enc).is_err())
+                        {
+                            break;
+                        }
+                    }
+                    Err(e) => warn!("encode failed: {e:#}"),
+                }
+                last = Some(frame);
+            }
+            debug!("encoder thread done");
+        })?;
         Ok(Self {
             stop,
             force_idr,
@@ -360,7 +413,7 @@ fn build(
     Ok(stream)
 }
 
-/// Resolves to `true` on SIGINT or SIGTERM. Handled explicitly so the output
+/// Resolves to `true` on SIGINT, SIGTERM or SIGHUP. Handled explicitly so the output
 /// is torn down in order, and because a sender started in the background by
 /// a non-interactive shell inherits SIGINT as ignored.
 fn shutdown_signal() -> Result<watch::Receiver<bool>> {
@@ -368,12 +421,15 @@ fn shutdown_signal() -> Result<watch::Receiver<bool>> {
     let (tx, rx) = watch::channel(false);
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
+    // The terminal closing (or a systemd reload) must not kill us mid-capture.
+    let mut hup = signal(SignalKind::hangup())?;
     tokio::spawn(async move {
-        tokio::select! {
-            _ = int.recv() => {}
-            _ = term.recv() => {}
-        }
-        info!("shutting down");
+        let name = tokio::select! {
+            _ = int.recv() => "SIGINT",
+            _ = term.recv() => "SIGTERM",
+            _ = hup.recv() => "SIGHUP",
+        };
+        info!("{name}: shutting down");
         let _ = tx.send(true);
     });
     Ok(rx)
@@ -630,6 +686,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     let mut sess = SenderSession::new(SenderConfig::default());
     sess.handle(now(start), SenderEvent::Connected);
     let mut active: Option<Active> = None;
+    // `opts` with this receiver's config table applied, once its hello names it.
+    let mut ropts = opts.clone();
     let mut debounce: Debounce<Target> = Debounce::new(desktop::HELLO_DEBOUNCE);
     let mut buf = vec![0u8; 64 * 1024];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -668,7 +726,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             warn!("{name} lost too often; closing the connection");
                             return Ok(SessionEnd::DisplayLost);
                         }
-                        match build(backend, &mut active, target, opts) {
+                        match build(backend, &mut active, target, &ropts) {
                             Ok(plan) => {
                                 info!("recreated virtual display {name}");
                                 send_stream_config(&mut stream, &sess, &plan).await?;
@@ -683,7 +741,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 },
                 _ = sleep_until_opt(debounce.deadline()) => {
                     if let Some(t) = debounce.poll(Instant::now()) {
-                        if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, opts).await {
+                        if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts).await {
                             return conflict_or(e, sess.hello().map_or_else(|| "this receiver".into(), receiver_label));
                         }
                     }
@@ -715,7 +773,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             "hello: {}x{} @{} scale {} device {:?} id {:?} pv {}",
                             h.pixels_wide, h.pixels_high, h.display_max_frame_rate.unwrap_or(60), h.scale, h.device, h.id, sess.receiver_pv()
                         );
-                        let t = match target(&h, opts) {
+                        ropts = opts.for_receiver(&[
+                            h.id.as_deref(),
+                            Some(opts.receiver_name.as_str()),
+                            h.device.as_deref(),
+                        ]);
+                        let t = match target(&h, &ropts) {
                             Ok(t) => t,
                             Err(e) => {
                                 warn!("cannot plan a desktop for this receiver: {e}; closing the connection");
@@ -729,7 +792,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         }
                         // The first plan applies at once; re-sent hellos settle first (§6.1).
                         if let Some(t) = debounce.on_hello(t, Instant::now()) {
-                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, opts).await {
+                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts).await {
                                 return conflict_or(e, receiver_label(&h));
                             }
                         }
@@ -804,6 +867,8 @@ mod tests {
             duration: None,
             receiver_id: None,
             receiver_name: "test".into(),
+            cli: Layer::default(),
+            config: Config::default(),
         }
     }
 
@@ -867,6 +932,7 @@ mod tests {
         log: Arc<Mutex<Vec<String>>>,
         sink: Arc<Mutex<Option<FrameSink>>>,
         fail_reconfigure: Arc<AtomicBool>,
+        panic_on_input: Arc<AtomicBool>,
     }
 
     impl Shared {
@@ -879,7 +945,16 @@ mod tests {
     }
 
     struct FakeBackend(Shared);
-    struct FakeDisplay(Shared, DisplayInfo);
+    /// The third field: `close` ran.
+    struct FakeDisplay(Shared, DisplayInfo, bool);
+
+    impl Drop for FakeDisplay {
+        fn drop(&mut self) {
+            if !self.2 {
+                self.0.log("dropped without close");
+            }
+        }
+    }
     struct FakeInput;
 
     impl InputSink for FakeInput {
@@ -916,7 +991,7 @@ mod tests {
         }
         fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
             self.0.log(format!("open {}", spec.name));
-            Ok(Box::new(FakeDisplay(self.0.clone(), info_of(spec))))
+            Ok(Box::new(FakeDisplay(self.0.clone(), info_of(spec), false)))
         }
         fn clean(&mut self) -> Result<Vec<String>> {
             Ok(vec![])
@@ -947,9 +1022,13 @@ mod tests {
             Ok(())
         }
         fn input(&mut self) -> Result<Box<dyn InputSink>> {
+            if self.0.panic_on_input.load(Ordering::Relaxed) {
+                panic!("injected panic in the session");
+            }
             Ok(Box::new(FakeInput))
         }
         fn close(mut self: Box<Self>, keep_output: bool) -> Result<()> {
+            self.2 = true;
             self.stop_capture();
             self.0.log(format!("close keep={keep_output}"));
             Ok(())
@@ -988,6 +1067,14 @@ mod tests {
         shared
             .fail_reconfigure
             .store(fail_reconfigure, Ordering::Relaxed);
+        drive_with(shared, hello, losses).await
+    }
+
+    async fn drive_with(
+        shared: Shared,
+        hello: Hello,
+        losses: usize,
+    ) -> (Vec<String>, Vec<ReceiverAction>, SessionEnd) {
         let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 16);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut backend = FakeBackend(shared.clone());
@@ -1087,7 +1174,9 @@ mod tests {
             [
                 format!("open {name}").as_str(),
                 "start_capture",
-                "reconfigure"
+                "reconfigure",
+                // Dropped on the error path: a real display removes its output.
+                "dropped without close"
             ]
         );
     }
@@ -1132,6 +1221,69 @@ mod tests {
         assert_eq!(held.name, name);
         drop(other);
         forget_lock(&name);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_pipeline_thread_reports_a_lost_display() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = spawn_reporting_panics("encode", tx, || panic!("injected")).unwrap();
+        assert!(h.join().is_err());
+        assert_eq!(rx.recv().await.as_deref(), Some("encode thread panicked"));
+        // A thread that returns normally reports nothing.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_reporting_panics("encode", tx, || {})
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_the_session_still_drops_the_display() {
+        let (hello, name) = test_hello("pn");
+        let shared = Shared::default();
+        shared.panic_on_input.store(true, Ordering::Relaxed);
+        let log = shared.clone();
+        let r = tokio::spawn(drive_with(shared, hello, 0)).await;
+        forget_lock(&name);
+        assert!(r.is_err_and(|e| e.is_panic()));
+        // Dropping a real display stops capture and then removes the output
+        // (wayland::display tests); here: it was dropped, not leaked.
+        assert_eq!(
+            log.entries(),
+            [
+                format!("open {name}").as_str(),
+                "start_capture",
+                "dropped without close"
+            ]
+        );
+    }
+
+    #[test]
+    fn receiver_tables_apply_under_the_command_line() {
+        let (hello, _) = test_hello("cf");
+        let id = hello.id.clone().unwrap();
+        let config = Config::parse(&format!(
+            "scale = \"mac\"\nbitrate-mbps = 12\n[receiver.\"{id}\"]\nposition = \"auto-left\"\nscale = 2\nbitrate-mbps = 30\n"
+        ))
+        .unwrap();
+        let base = RunOptions {
+            cli: Layer {
+                bitrate_mbps: Some(8.0),
+                ..Layer::default()
+            },
+            config,
+            ..opts()
+        };
+        let r = base.for_receiver(&[hello.id.as_deref(), Some("test"), Some("iPhone")]);
+        assert_eq!(r.position, Position::AutoLeft);
+        assert_eq!(r.desktop.scale, crate::desktop::ScalePolicy::Fixed(2.0));
+        assert_eq!(r.bitrate_mbps, 8.0, "the command line wins");
+        let t = target(&hello, &r).unwrap();
+        assert_eq!((t.spec.scale, t.spec.position), (2.0, Position::AutoLeft));
+        // Another receiver gets the options as they were.
+        let other = base.for_receiver(&[Some("someone-else"), None, None]);
+        assert_eq!(other.position, base.position);
     }
 
     #[test]
