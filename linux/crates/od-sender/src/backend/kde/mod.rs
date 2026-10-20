@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use self::input::FakeInput;
 use self::screencast::{Pointer, Request, VirtualOutputStream};
-use super::lock::{OutputLock, lock_output};
+use super::lock::{self, OutputLock, lock_output};
 use super::{
     Backend, BackendId, Caps, CaptureOptions, DisplayInfo, DisplaySpec, FrameSink, InputSink,
     VirtualDisplay,
@@ -80,9 +80,25 @@ impl Backend for KdeBackend {
         Ok(Box::new(d))
     }
 
-    /// KWin drops a virtual output with its client; there are no leftovers.
+    /// KWin drops a virtual output with its client, so no output is left
+    /// behind; but a sender killed during a left/up placement leaves the
+    /// user's outputs shifted. With no sender running, move them back.
     fn clean(&mut self) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        // Held while moving outputs, so no sender starts meanwhile.
+        let mut held = Vec::new();
+        for name in lock::names()? {
+            match lock::try_lock(&name)? {
+                Some(l) => held.push(l),
+                None => {
+                    info!("{name} is in use by a running od-sender; leaving the layout alone");
+                    return Ok(Vec::new());
+                }
+            }
+        }
+        Ok(match outputs::reset_origin()? {
+            Some((dx, dy)) => vec![format!("layout offset (moved outputs by {dx},{dy})")],
+            None => Vec::new(),
+        })
     }
 }
 

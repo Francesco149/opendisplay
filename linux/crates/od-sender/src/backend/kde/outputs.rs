@@ -183,23 +183,38 @@ pub fn configure(name: &str, scale: f64, position: Position) -> Result<Placement
 /// starts at 0,0 again, undoing the shift a left/up placement made.
 pub fn restore_origin(gone: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
-    let (conn, mut queue, mut st, management) = loop {
+    let s = loop {
         let s = session()?;
         if !s.2.devices.values().any(|d| d.name == gone) || Instant::now() > deadline {
             break s;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    move_to_origin(s, |name| name == gone).map(|_| ())
+}
+
+/// `od-sender clean`: undo the shift a sender killed during a left/up
+/// placement left behind (SENDER-PLAN §8.17). Our own outputs vanish with
+/// their sender; only the user's outputs can be offset. Returns the shift.
+pub fn reset_origin() -> Result<Option<(i32, i32)>> {
+    move_to_origin(session()?, |name| name.starts_with("Virtual-od-"))
+}
+
+/// Shift every enabled output not `skip`ped so the layout's top-left is 0,0.
+fn move_to_origin(
+    (conn, mut queue, mut st, management): Session,
+    skip: impl Fn(&str) -> bool,
+) -> Result<Option<(i32, i32)>> {
     let enabled: Vec<(ObjectId, LayoutRect)> = st
         .devices
         .iter()
-        .filter(|(_, d)| d.enabled && d.name != gone)
+        .filter(|(_, d)| d.enabled && !skip(&d.name))
         .filter_map(|(id, d)| Some((id.clone(), st.logical(d)?)))
         .collect();
     let min_x = enabled.iter().map(|(_, r)| r.x).min().unwrap_or(0);
     let min_y = enabled.iter().map(|(_, r)| r.y).min().unwrap_or(0);
     if (min_x, min_y) == (0, 0) || enabled.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let qh = queue.handle();
     let config = management.create_configuration(&qh, ());
@@ -208,15 +223,17 @@ pub fn restore_origin(gone: &str) -> Result<()> {
             config.position(p, r.x - min_x, r.y - min_y);
         }
     }
-    apply(&conn, &mut queue, &mut st, config).context("restoring the output layout")
+    apply(&conn, &mut queue, &mut st, config).context("restoring the output layout")?;
+    Ok(Some((-min_x, -min_y)))
 }
 
-/// The shift that puts the layout (ours at `at`, plus `others`) at 0,0 when
-/// it would otherwise reach into negative coordinates.
+/// The shift that puts the layout (ours at `at`, plus `others`) at 0,0:
+/// out of negative coordinates, which KWin refuses, and back from a
+/// positive offset a killed sender's left/up placement left behind.
 pub fn normalize(at: (i32, i32), others: &[LayoutRect]) -> (i32, i32) {
     let min_x = others.iter().map(|r| r.x).chain([at.0]).min().unwrap_or(0);
     let min_y = others.iter().map(|r| r.y).chain([at.1]).min().unwrap_or(0);
-    ((-min_x).max(0), (-min_y).max(0))
+    (-min_x, -min_y)
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -381,5 +398,10 @@ mod tests {
         // Right of or below: nothing moves.
         let at = place(Position::AutoRight, 512, 384, &[laptop]);
         assert_eq!(normalize(at, &[laptop]), (0, 0));
+        // A killed sender left the laptop shifted right: back to 0,0.
+        let stale = LayoutRect { x: 512, ..laptop };
+        let at = place(Position::AutoRight, 512, 384, &[stale]);
+        assert_eq!(at, (1792, 0));
+        assert_eq!(normalize(at, &[stale]), (-512, 0));
     }
 }
