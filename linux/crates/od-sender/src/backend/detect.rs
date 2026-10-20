@@ -409,7 +409,7 @@ pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
         Decision::Hyprland { socket } => Ok(Box::new(HyprlandBackend::connect(socket)?)),
         Decision::Wlroots { swaysock } => Ok(Box::new(WlrootsBackend::connect(swaysock)?)),
         #[cfg(feature = "kde")]
-        Decision::Kde => Ok(Box::new(super::kde::KdeBackend)),
+        Decision::Kde => Ok(Box::<super::kde::KdeBackend>::default()),
         #[cfg(not(feature = "kde"))]
         Decision::Kde => Err(anyhow!(Unsupported("built without KDE support".into()))),
         #[cfg(feature = "gnome")]

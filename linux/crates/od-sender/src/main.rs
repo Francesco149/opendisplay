@@ -1,4 +1,5 @@
 mod backend;
+mod bounded;
 mod config;
 mod desktop;
 mod dev;
@@ -296,7 +297,7 @@ fn real_main() -> Result<i32> {
             });
             let mut backend = detect::detect(&backend.request_with(config.capture))?;
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
+            let ran = rt.block_on(async {
                 let receiver = resolve_receiver(to, connect, name, wait)?;
                 session::run(
                     receiver.addr,
@@ -326,7 +327,11 @@ fn real_main() -> Result<i32> {
                     },
                 )
                 .await
-            })?;
+            });
+            // A drift probe may still be waiting on compositor IPC; the
+            // display is already gone, so do not wait long for it.
+            rt.shutdown_timeout(Duration::from_millis(500));
+            ran?;
         }
         Cmd::List { timeout } => {
             let found = discover::list(Duration::from_secs_f64(timeout))?;

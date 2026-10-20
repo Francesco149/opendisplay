@@ -3,15 +3,19 @@
 //! applies custom modes to headless outputs, so no IPC is needed for sizing.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
+
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_configuration_head_v1, zwlr_output_configuration_v1, zwlr_output_head_v1,
     zwlr_output_manager_v1, zwlr_output_mode_v1,
 };
+
+use crate::wayland::dispatch_until;
 
 /// What to apply to the output called `name`.
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +171,9 @@ ignore!(
     zwlr_output_configuration_head_v1::ZwlrOutputConfigurationHeadV1
 );
 
+/// How long the compositor gets to answer one output-management request.
+const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+
 /// Apply `t` to its output and leave every other head as it is. Retries when
 /// the compositor cancels because the layout changed under us.
 pub fn apply(t: &Target) -> Result<()> {
@@ -181,9 +188,14 @@ pub fn apply(t: &Target) -> Result<()> {
         .clone()
         .context("compositor lacks zwlr_output_manager_v1")?;
     for _attempt in 0..3 {
-        while st.serial.is_none() {
-            queue.blocking_dispatch(&mut st)?;
-        }
+        dispatch_until(
+            &conn,
+            &mut queue,
+            &mut st,
+            Instant::now() + ANSWER_WITHIN,
+            "the output layout",
+            |st| st.serial.is_some(),
+        )?;
         let serial = st.serial.take().unwrap();
         if !st.heads.values().any(|h| h.name == t.name) {
             bail!("output manager has no head {}", t.name);
@@ -206,9 +218,14 @@ pub fn apply(t: &Target) -> Result<()> {
         }
         config.apply();
         st.outcome = None;
-        while st.outcome.is_none() {
-            queue.blocking_dispatch(&mut st)?;
-        }
+        dispatch_until(
+            &conn,
+            &mut queue,
+            &mut st,
+            Instant::now() + ANSWER_WITHIN,
+            "a verdict on the output configuration",
+            |st| st.outcome.is_some(),
+        )?;
         config.destroy();
         match st.outcome {
             Some(Outcome::Succeeded) => return Ok(()),

@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use super::events::ReloadWatcher;
 
 use super::ipc::{HyprlandIpc, Monitor};
-use crate::backend::{DisplayInfo, DisplaySpec};
+use crate::backend::{DisplayInfo, DisplaySpec, DriftProbe};
 use crate::wayland::cursor::CursorSpace;
 use crate::wayland::display::OutputControl;
 
@@ -122,21 +122,24 @@ impl OutputControl for HyprlandOutput {
         Ok(())
     }
 
-    fn drifted(&mut self) -> Option<String> {
+    fn drift_probe(&mut self) -> Option<DriftProbe> {
         if self
             .reloads
             .as_ref()
             .is_some_and(|w| w.take_settled(RELOAD_SETTLE))
         {
-            return Some("Hyprland config reloaded".into());
+            return Some(Box::new(|| Some("Hyprland config reloaded".into())));
         }
         if self.spec.is_none() || self.last_check.elapsed() < DRIFT_CHECK {
             return None;
         }
         self.last_check = Instant::now();
-        // A missing output is the capture-loss path's business.
-        let m = self.ipc.monitor(&self.info.name).ok().flatten()?;
-        drift(&self.info, &m)
+        let (ipc, info) = (self.ipc.clone(), self.info.clone());
+        Some(Box::new(move || {
+            // A missing output is the capture-loss path's business.
+            let m = ipc.monitor(&info.name).ok().flatten()?;
+            drift(&info, &m)
+        }))
     }
 
     /// Hyprland 0.56.2 reports cursor positions and hotspots in logical

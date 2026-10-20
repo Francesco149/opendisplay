@@ -29,7 +29,18 @@ pub fn output_name(lock_name: &str) -> String {
     format!("Virtual-{lock_name}")
 }
 
-pub struct KdeBackend;
+/// The pointer mode new outputs are made with; KWin fixes it per stream.
+pub struct KdeBackend {
+    pointer: Pointer,
+}
+
+impl Default for KdeBackend {
+    fn default() -> Self {
+        Self {
+            pointer: Pointer::Embedded,
+        }
+    }
+}
 
 impl Backend for KdeBackend {
     /// Frames come over PipeWire, not a Wayland capture protocol.
@@ -57,12 +68,18 @@ impl Backend for KdeBackend {
         }
     }
 
+    /// Called before the first `open`, so `--cursor off` makes the output
+    /// hidden-pointer at once instead of recreating it in `start_capture`.
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.pointer = pointer_mode(visible);
+    }
+
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
         let lock = lock_output(&spec.name)?;
         let mut d = KdeDisplay {
             capture: None,
             stream: None,
-            pointer: Pointer::Embedded,
+            pointer: self.pointer,
             shifted_others: false,
             spec: spec.clone(),
             info: DisplayInfo {
@@ -239,6 +256,14 @@ impl KdeDisplay {
     }
 }
 
+fn pointer_mode(cursor_in_video: bool) -> Pointer {
+    if cursor_in_video {
+        Pointer::Embedded
+    } else {
+        Pointer::Hidden
+    }
+}
+
 impl VirtualDisplay for KdeDisplay {
     fn info(&self) -> &DisplayInfo {
         &self.info
@@ -247,11 +272,7 @@ impl VirtualDisplay for KdeDisplay {
     fn start_capture(&mut self, opts: CaptureOptions, sink: FrameSink) -> Result<()> {
         self.stop_capture();
         // KWin fixes the pointer mode when the stream is made.
-        let want = if opts.cursor {
-            Pointer::Embedded
-        } else {
-            Pointer::Hidden
-        };
+        let want = pointer_mode(opts.cursor);
         if want != self.pointer {
             info!("recreating {} for pointer mode {want:?}", self.info.name);
             self.pointer = want;

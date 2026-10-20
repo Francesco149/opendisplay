@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use super::mutter::{AXIS_SOURCE_FINGER, InputHandle};
 use crate::backend::InputSink;
+use crate::bounded::{BoundedThread, DROP_JOIN};
 
 const BTN_LEFT: i32 = 0x110;
 
@@ -86,46 +87,62 @@ impl Mapper {
 }
 
 pub struct RemoteInput {
-    tx: mpsc::Sender<Cmd>,
+    tx: Option<mpsc::Sender<Cmd>>,
+    thread: BoundedThread,
 }
 
 impl RemoteInput {
     pub fn start(handle: InputHandle, mut mapper: Mapper) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel::<Cmd>();
-        std::thread::Builder::new()
-            .name("gnome-input".into())
-            .spawn(move || {
-                let run = |c: Call| {
-                    let r = match c {
-                        Call::Motion(x, y) => handle.motion(x, y),
-                        Call::Button(b, p) => handle.button(b, p),
-                        Call::Axis(dx, dy, f) => handle.axis(dx, dy, f),
-                    };
-                    if let Err(e) = r {
-                        warn!("input: {e:#}");
-                    }
+        let thread = BoundedThread::spawn("gnome-input", move || {
+            let run = |c: Call| {
+                let r = match c {
+                    Call::Motion(x, y) => handle.motion(x, y),
+                    Call::Button(b, p) => handle.button(b, p),
+                    Call::Axis(dx, dy, f) => handle.axis(dx, dy, f),
                 };
-                for cmd in rx {
-                    let calls = match cmd {
-                        Cmd::Touch(t) => mapper.touch(&t),
-                        Cmd::Scroll(s) => mapper.scroll(&s),
-                    };
-                    calls.into_iter().for_each(run);
+                if let Err(e) = r {
+                    warn!("input: {e:#}");
                 }
-                mapper.release().into_iter().for_each(run);
-                debug!("gnome input thread done");
-            })?;
-        Ok(Self { tx })
+            };
+            for cmd in rx {
+                let calls = match cmd {
+                    Cmd::Touch(t) => mapper.touch(&t),
+                    Cmd::Scroll(s) => mapper.scroll(&s),
+                };
+                calls.into_iter().for_each(run);
+            }
+            mapper.release().into_iter().for_each(run);
+            debug!("gnome input thread done");
+        })?;
+        Ok(Self {
+            tx: Some(tx),
+            thread,
+        })
+    }
+
+    fn send(&self, cmd: Cmd) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(cmd);
+        }
+    }
+}
+
+impl Drop for RemoteInput {
+    /// Ends the command loop and waits (bounded) for the button release.
+    fn drop(&mut self) {
+        self.tx = None;
+        self.thread.join_within(DROP_JOIN);
     }
 }
 
 impl InputSink for RemoteInput {
     fn touch(&mut self, t: &Touch) {
-        let _ = self.tx.send(Cmd::Touch(t.clone()));
+        self.send(Cmd::Touch(t.clone()));
     }
 
     fn scroll(&mut self, s: &Scroll) {
-        let _ = self.tx.send(Cmd::Scroll(s.clone()));
+        self.send(Cmd::Scroll(s.clone()));
     }
 }
 

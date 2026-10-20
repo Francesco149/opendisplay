@@ -13,7 +13,8 @@ use super::input::InputInjector;
 use crate::backend::capture::CapturePath;
 use crate::backend::lock::OutputLock;
 use crate::backend::{
-    CaptureOptions, CursorSink, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
+    CaptureOptions, CursorSink, DisplayInfo, DisplaySpec, DriftProbe, FrameSink, InputSink,
+    VirtualDisplay,
 };
 use std::sync::{Arc, Mutex};
 
@@ -24,10 +25,12 @@ pub trait OutputControl: Send + 'static {
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
     /// Remove the output (a no-op for outputs the sender did not create).
     fn remove(&mut self) -> Result<()>;
-    /// `Some(why)` when the compositor changed the output away from what
+    /// A check of whether the compositor changed the output away from what
     /// [`reconfigure`](Self::reconfigure) set (a config reload, a rule), so
-    /// the session should apply its spec again. Called often: keep it cheap.
-    fn drifted(&mut self) -> Option<String> {
+    /// the session should apply its spec again; see
+    /// [`VirtualDisplay::drift_probe`]. Called often: compositor IPC goes
+    /// in the returned probe.
+    fn drift_probe(&mut self) -> Option<DriftProbe> {
         None
     }
     /// The units this compositor's cursor session reports in for the
@@ -148,8 +151,8 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
         self.output.reconfigure(spec)
     }
 
-    fn drifted(&mut self) -> Option<String> {
-        self.output.drifted()
+    fn drift_probe(&mut self) -> Option<DriftProbe> {
+        self.output.drift_probe()
     }
 
     fn input(&mut self) -> Result<Box<dyn InputSink>> {

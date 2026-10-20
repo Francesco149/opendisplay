@@ -1176,9 +1176,11 @@ name = "od-sender"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-io",
  "bitflags",
  "clap",
  "ffmpeg-next",
+ "futures-lite",
  "mdns-sd",
  "miniz_oxide",
  "opendisplay-proto",

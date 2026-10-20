@@ -595,6 +595,9 @@ pub struct CursorThread {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How long [`CursorThread::spawn`] waits for the cursor session.
+const READY_WITHIN: Duration = Duration::from_secs(5);
+
 impl CursorThread {
     /// Start delivering the cursor of output `name`, whose cursor session
     /// reports in `space`. Returns once the cursor session exists, or with
@@ -631,7 +634,10 @@ impl CursorThread {
                     Err(_) => warn!("cursor thread panicked; the cursor stays where it was"),
                 }
             })?;
-        match ready_rx.recv() {
+        // Bounded: the setup roundtrips wait on the compositor. A thread
+        // still stuck in them is told to stop and left; it exits once the
+        // compositor answers (or the connection goes).
+        match ready_rx.recv_timeout(READY_WITHIN) {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 handle: Some(handle),
@@ -640,7 +646,11 @@ impl CursorThread {
                 let _ = handle.join();
                 Err(e)
             }
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                stop.store(true, Ordering::Relaxed);
+                bail!("the compositor did not open a cursor session within {READY_WITHIN:?}")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = handle.join();
                 bail!("cursor thread died")
             }
