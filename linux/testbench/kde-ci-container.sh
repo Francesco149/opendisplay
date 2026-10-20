@@ -6,7 +6,12 @@ set -euo pipefail
 
 pacman -Syu --noconfirm --needed \
   base-devel git rust clang pkgconf nasm ffmpeg libpipewire \
-  kwin pipewire wireplumber dbus
+  kwin pipewire wireplumber dbus libcap
+# Arch ships kwin_wayland with a file capability (CAP_SYS_NICE) that
+# Docker's default set lacks, so executing it fails with "Operation not
+# permitted" (as /usr/bin/sway did on #298). A plain copy carries none.
+getcap /usr/bin/kwin_wayland || true
+install -m755 /usr/bin/kwin_wayland /usr/local/bin/kwin_wayland
 useradd --create-home tester
 chown -R tester: /src /logs
 # The render node (vgem on hosted runners) belongs to the host's groups.
@@ -19,5 +24,5 @@ sudo -u tester -H bash -c '
   cargo build --locked --release -p od-sender
   cargo build --locked --release -p od-receiver --no-default-features
 '
-sudo -u tester -H env OD_RECEIVER=/src/linux/target/release/od-receiver \
+sudo -u tester -H env PATH=/usr/local/bin:/usr/bin OD_RECEIVER=/src/linux/target/release/od-receiver \
   timeout 240 /src/linux/testbench/kde-smoke.sh /src/linux/target/release/od-sender /logs
