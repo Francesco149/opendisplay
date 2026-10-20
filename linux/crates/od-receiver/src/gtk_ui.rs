@@ -155,6 +155,9 @@ impl VideoOutput for GtkVideo {
     fn rendered(&self) -> Option<u64> {
         self.inner.rendered()
     }
+    fn take_decode_ms(&mut self) -> Vec<f64> {
+        self.inner.take_decode_ms()
+    }
     fn cursor(&mut self, x: Option<f64>, y: Option<f64>, visible: bool) {
         on_ui(move |ui| {
             if let (Some(x), Some(y)) = (x, y) {

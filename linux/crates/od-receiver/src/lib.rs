@@ -226,6 +226,9 @@ impl Receiver {
                         last_rendered = r;
                         extra.insert("renderFps".into(), ((delta as f64 / self.cfg.stats_every.as_secs_f64() * 10.0).round() / 10.0).into());
                     }
+                    for ms in self.video.take_decode_ms() {
+                        window.decoded(ms);
+                    }
                     let stats = window.flush(extra);
                     info!("stats {stats}");
                     if sess.is_connected() { vec![sess.control(&ControlMessage::Stats(stats))] } else { vec![] }

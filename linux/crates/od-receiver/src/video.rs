@@ -92,6 +92,10 @@ pub trait VideoOutput: Send {
     fn rendered(&self) -> Option<u64> {
         None
     }
+    /// Push -> sink times (ms) of the frames shown since the last call.
+    fn take_decode_ms(&mut self) -> Vec<f64> {
+        Vec::new()
+    }
     /// The sender's cursor moved (§6.2, normalised to the video); presenters
     /// that draw no cursor ignore it.
     fn cursor(&mut self, _x: Option<f64>, _y: Option<f64>, _visible: bool) {}
@@ -140,7 +144,7 @@ pub mod gst_out {
     use gstreamer_app as gst_app;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use tracing::{info, warn};
+    use tracing::{debug, info, warn};
 
     pub struct GstOutput {
         cfg: VideoConfig,
@@ -151,6 +155,8 @@ pub mod gst_out {
         paintable_sink: Option<gst::Element>,
         decoder_name: Option<String>,
         rendered: Arc<AtomicU64>,
+        /// Push -> sink latencies since the last `take_decode_ms`.
+        decode_ms: Arc<std::sync::Mutex<Vec<f64>>>,
         /// Decoders demoted after failing here, for `describe`.
         demoted: Vec<String>,
         /// Push count at which "nothing rendered" means the decoder failed.
@@ -241,7 +247,8 @@ pub mod gst_out {
                 );
             }
             let rendered = Arc::new(AtomicU64::new(0));
-            let (desc, pipeline, appsrc, paintable_sink) = Self::build(cfg, &rendered)?;
+            let decode_ms = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (desc, pipeline, appsrc, paintable_sink) = Self::build(cfg, &rendered, &decode_ms)?;
             Ok(Self {
                 cfg: cfg.clone(),
                 desc,
@@ -250,6 +257,7 @@ pub mod gst_out {
                 paintable_sink,
                 decoder_name: None,
                 rendered,
+                decode_ms,
                 demoted: Vec::new(),
                 // A working decoder shows its first frame within a few; a
                 // quarter second at 60 FPS is plenty before giving up on it.
@@ -265,6 +273,7 @@ pub mod gst_out {
         fn build(
             cfg: &VideoConfig,
             rendered: &Arc<AtomicU64>,
+            decode_ms: &Arc<std::sync::Mutex<Vec<f64>>>,
         ) -> Result<(String, gst::Pipeline, gst_app::AppSrc, Option<gst::Element>)> {
             let desc = launch_description(cfg);
             let pipeline = gst::parse::launch(&desc)
@@ -276,6 +285,18 @@ pub mod gst_out {
                 .context("appsrc missing")?
                 .downcast::<gst_app::AppSrc>()
                 .map_err(|_| anyhow!("src is not an appsrc"))?;
+            // GStreamer's stateless H.264 decoders (v4l2sl, va) hold pictures
+            // in the DPB for reordering unless the stream proves there is
+            // none: about two frames (32 ms) at 60 FPS. Senders here never
+            // reorder (no B-frames), so output as soon as decodable.
+            pipeline.connect_deep_element_added(|_, _, el| {
+                if let Some(p) = el.find_property("compliance") {
+                    if p.value_type().name() == "GstH264DecoderCompliance" {
+                        el.set_property_from_str("compliance", "flexible");
+                        debug!("{}: compliance=flexible", el.name());
+                    }
+                }
+            });
             #[allow(unused_mut)]
             let mut paintable_sink = pipeline.by_name("gtksink");
             #[cfg(feature = "gtk")]
@@ -291,12 +312,33 @@ pub mod gst_out {
                 paintable_sink = Some(sink);
             }
             let counter = rendered.clone();
+            let latencies = decode_ms.clone();
             let probe_pad = pipeline
                 .by_name("rendered")
                 .and_then(|e| e.static_pad("src"))
                 .context("identity pad")?;
-            probe_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            probe_pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
                 counter.fetch_add(1, Ordering::Relaxed);
+                // appsrc stamps each access unit with the running time of its
+                // push (do-timestamp), so now - PTS is the time it spent in
+                // the parser, decoder and present queue.
+                if let (Some(gst::PadProbeData::Buffer(buf)), Some(el)) =
+                    (&info.data, pad.parent_element())
+                {
+                    if let (Some(pts), Some(clock), Some(base)) =
+                        (buf.pts(), el.clock(), el.base_time())
+                    {
+                        if let Some(now) = clock.time().checked_sub(base) {
+                            if let Some(d) = now.checked_sub(pts) {
+                                if let Ok(mut v) = latencies.lock() {
+                                    if v.len() < 1000 {
+                                        v.push(d.nseconds() as f64 / 1e6);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 gst::PadProbeReturn::Ok
             });
             pipeline
@@ -311,7 +353,8 @@ pub mod gst_out {
         /// created with, so only a new one plugs a different decoder.
         fn recreate(&mut self) -> Result<()> {
             let _ = self.pipeline.set_state(gst::State::Null);
-            let (desc, pipeline, appsrc, paintable_sink) = Self::build(&self.cfg, &self.rendered)?;
+            let (desc, pipeline, appsrc, paintable_sink) =
+                Self::build(&self.cfg, &self.rendered, &self.decode_ms)?;
             self.desc = desc;
             self.pipeline = pipeline;
             self.appsrc = appsrc;
@@ -506,6 +549,13 @@ pub mod gst_out {
 
         fn rendered(&self) -> Option<u64> {
             Some(self.rendered.load(Ordering::Relaxed))
+        }
+
+        fn take_decode_ms(&mut self) -> Vec<f64> {
+            self.decode_ms
+                .lock()
+                .map(|mut v| std::mem::take(&mut *v))
+                .unwrap_or_default()
         }
     }
 
