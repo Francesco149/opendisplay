@@ -110,6 +110,7 @@ Useful `run` options:
 | `--encoder` | `auto` | `auto`, `v4l2m2m`, `x264` or `openh264` |
 | `--cursor` | `auto` | `auto`, `video` (always paint the cursor into the video) or `off`; `--no-cursor` is `off`. `auto` sends the cursor separately when the receiver and desktop support it, which today means never on Hyprland |
 | `--capture` | `auto` | Screen-capture protocol on Hyprland and Sway: `auto`, `ext` or `wlr`. `auto` uses `wlr` on Hyprland before 0.57, whose `ext` capture can crash when an output disappears |
+| `--workspace` | next free one | Show this workspace (name or number) on the new display, keeping your focus where it is. Hyprland and Sway; ignored with a warning elsewhere |
 | `--backend` | detected | `hyprland`, `wlroots` (Sway), `kde`, `gnome`, or `adopt` with `--output <name>` |
 
 `--instance <index|signature>` (any command) targets one of several running
@@ -142,11 +143,13 @@ max-fps = 60
 encoder = "auto"         # "auto", "v4l2m2m", "x264" or "openh264"
 cursor = "auto"          # "auto", "video" or "off" (true/false: auto/off)
 capture = "auto"         # "auto", "ext" or "wlr"
+workspace = "8"          # Hyprland/Sway: show workspace 8 on the new display
 
-# Overrides for one receiver: position, scale and bitrate-mbps only.
+# Overrides for one receiver: position, scale, bitrate-mbps and workspace.
 [receiver."3F2A9C1E-..."]
 position = "auto-left"
 scale = 2
+workspace = "phone"
 ```
 
 A `[receiver."…"]` table is matched against the receiver's id (shown by
