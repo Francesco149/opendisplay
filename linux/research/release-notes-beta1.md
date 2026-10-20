@@ -82,8 +82,9 @@ od-sender run             # first receiver found; or: od-sender run --to iPhone
 * **Software encoding.** No VA-API yet; x264 on the CPU. A 5K iMac streamed at
   4096x2304 shows about 55-70 ms end to end against ~20 ms for an iPhone.
 * **KDE Plasma:** `--position auto-left` or `auto-up` shift your other screens
-  (Plasma allows no negative positions); they move back when the sender
-  exits, not after a crash.
+  while the display exists (Plasma allows no negative positions); they move
+  back when it goes, also after a crash (KWin 6.8 does that itself;
+  `od-sender clean` is the fallback).
 * **GNOME:** scale snaps to what GNOME offers for the size (an iPhone's 3
   becomes 2); setting scale or position applies a temporary display
   configuration that keeps your other monitors as they are.
