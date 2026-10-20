@@ -368,6 +368,13 @@ port 5353 ever misbehaves.
    measured on arrival, before decode, and is stable rather than growing.
    Either a fixed delay in the Mac receiver's read path or a skewed clock
    offset there; check felt lag and the receiver log on the iMac.
+   *Resolved 2026-10-20:* the 220 ms came from the sender before the socket:
+   4K software convert + x264, plus an oldest-frame handoff bug (fixed,
+   `latest.rs`). With that fix and banded BGRA→I420, a live session to the
+   iMac (4096x2304@55, Wi-Fi) shows e2e p50 55–67 ms / p95 ~145 ms at
+   20–28 fps under motion, with enc50 ≈ e2e − 3 ms, so the network and
+   receiver add almost nothing. The user called it usable but laggy.
+   Remaining cost is software 4K encode (no hardware encoder on Asahi, #360).
    Not done: VA-API backend (Intel box), BGRA→I420 off the CPU (~5 ms at
    2556×1178), overlapping capture/convert with encode, cursor side
    channel, `hello.panel` / `maxEncodeWide` sizing, and a sender option
