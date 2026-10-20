@@ -32,8 +32,8 @@ means the supported matrix is narrow and stated, not that the code is rough.
 | Tier | Setup | Meaning |
 |---|---|---|
 | **Tested** | Arch/Omarchy, Hyprland 0.56.x, aarch64 (Asahi, M1 Pro), software x264 encode; receivers: iPhone (App Store), Android (Play beta), Mac receiver app (Intel) | Every item in §5 ran here before tagging |
-| **Expected to work** | Arch/Omarchy on x86_64 (same binary paths; VA-API is not used yet, so it is x264 there too); any distro with Hyprland >= 0.55 and an FFmpeg built with libx264 (Fedora's `ffmpeg-free` falls back to the bundled OpenH264, slower); iPad | Same code, untested hardware or receiver. Say so on the website; ask for reports |
-| **Unsupported at beta** | Sway and other wlroots compositors, niri/COSMIC/river/labwc, GNOME, KDE, X11 sessions, Hyprland < 0.55 (pre-Lua IPC), USB/usbmuxd transport, HEVC, Apple Pencil pressure (mapped to a pointer), audio, mirror mode | `od-sender` exits with a message that names the gap and links the issue |
+| **Expected to work** | Arch/Omarchy on x86_64 (same binary paths; VA-API is not used yet, so it is x264 there too); any distro with Hyprland >= 0.55 and an FFmpeg built with libx264 (Fedora's `ffmpeg-free` falls back to the bundled OpenH264, slower); iPad; **Sway >= 1.10** (wlroots backend, verified end to end only on headless Sway in CI, never on a real Sway desktop); other wlroots compositors (river, labwc, Wayfire) via `--output <name>` adopt mode only | Same code, untested hardware or receiver. Say so on the website; ask for reports |
+| **Unsupported at beta** | niri/COSMIC (unchecked), GNOME, KDE, X11 sessions, Hyprland < 0.55 (pre-Lua IPC), USB/usbmuxd transport, HEVC, Apple Pencil pressure (mapped to a pointer), audio, mirror mode | `od-sender` exits with a message that names the gap and links the issue |
 
 ### 1.2 Exit criteria (all on this machine unless noted)
 
