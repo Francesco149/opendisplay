@@ -19,6 +19,7 @@ use crate::capture::{self, FrameInfo};
 use crate::encoder::{Encoded, Encoder, EncoderSettings};
 use crate::hyprland::HyprlandIpc;
 use crate::input::{InputCmd, InputInjector};
+use crate::latest;
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -117,10 +118,10 @@ impl Display {
 
         let stop = Arc::new(AtomicBool::new(false));
         let force_idr = Arc::new(AtomicBool::new(true));
-        let (raw_tx, raw_rx) = std::sync::mpsc::sync_channel::<RawFrame>(1);
+        let (raw_tx, raw_rx) = latest::channel::<RawFrame>();
         let (encoded_tx, encoded_rx) = mpsc::channel::<Encoded>(4);
 
-        // Capture thread: latest wins at the channel; a busy encoder drops the older frame.
+        // Capture thread: latest wins at the slot; a busy encoder drops the older frame.
         let cap_stop = stop.clone();
         let cap_name = name.clone();
         let cursor = opts.cursor_in_video;
@@ -133,7 +134,7 @@ impl Display {
                     Duration::from_secs(u64::MAX / 4),
                     cap_stop,
                     |info, pixels| {
-                        let _ = raw_tx.try_send(RawFrame {
+                        raw_tx.send(RawFrame {
                             info: *info,
                             pixels: pixels.to_vec(),
                             captured_at: Instant::now(),
