@@ -125,7 +125,7 @@ od-sender/src/
     lock.rs            today's lock_output(): one sender per output name
     adopt.rs           "use an existing output": no create/remove, capture + input only (§3.7)
     hyprland/          today's hyprland.rs (IPC) + HyprlandDisplay (VirtualDisplay impl)
-    wlroots/           later: sway `create_output` + zwlr_output_manager_v1; shares wayland/*
+    wlroots/           Sway IPC create/unplug, zwlr_output_manager_v1 sizing, lock-side record; shares wayland/*
     kde/               later: zkde_screencast_unstable_v1 virtual output + PipeWire + RemoteDesktop portal
     portal/            later: ashpd ScreenCast(VIRTUAL)+RemoteDesktop, PipeWire frames (GNOME; KDE fallback)
   wayland/
@@ -211,13 +211,13 @@ with a `Drop` can enforce. The session loop never sees a `HyprlandIpc` again.
 
 Per backend:
 
-| | Hyprland (beta) | Adopt (next) | wlroots/Sway (later) | KDE (later) | Portal: GNOME (later) |
+| | Hyprland (beta) | Adopt (next) | wlroots/Sway (landed) | KDE (later) | Portal: GNOME (later) |
 |---|---|---|---|---|---|
-| Create/size output | IPC `output create headless`, `eval hl.monitor({...})`, verify via `j/monitors` (*verified*) | none: user names an output they created or a real one to mirror | `swaymsg create_output` + `output <name> mode --custom WxH@Hz scale S` (*plausible*) | `zkde_screencast_unstable_v1.stream_virtual_output_with_description(name, description, logical w, h, scale)` (since v4; v2 without description) creates the output and returns a PipeWire node (*verified* in the protocol XML; whether unprivileged clients may bind it: *unverified*). Portal fallback: `SelectSources types=VIRTUAL` exists, but the **user picks the size in KDE's chooser dialog** (default 1920x1080, restorable via token `virtualSize`), the app cannot request it (*verified* in xdg-desktop-portal-kde `screencast.cpp`) | `ScreenCast.SelectSources` with `types = VIRTUAL`; size control *unverified* |
+| Create/size output | IPC `output create headless`, `eval hl.monitor({...})`, verify via `j/monitors` (*verified*) | none: user names an output they created or a real one to mirror | Sway IPC `create_output` (Sway picks `HEADLESS-<n>`; found by diffing `get_outputs`), then mode, scale and position through `zwlr_output_manager_v1` (`set_custom_mode`), read back via `get_outputs` (*verified*, Sway 1.12, CI) | `zkde_screencast_unstable_v1.stream_virtual_output_with_description(name, description, logical w, h, scale)` (since v4; v2 without description) creates the output and returns a PipeWire node (*verified* in the protocol XML; whether unprivileged clients may bind it: *unverified*). Portal fallback: `SelectSources types=VIRTUAL` exists, but the **user picks the size in KDE's chooser dialog** (default 1920x1080, restorable via token `virtualSize`), the app cannot request it (*verified* in xdg-desktop-portal-kde `screencast.cpp`) | `ScreenCast.SelectSources` with `types = VIRTUAL`; size control *unverified* |
 | Frames | `wayland/capture.rs` shm; dmabuf later | same | same | PipeWire | PipeWire |
 | Cursor | baked in at beta; later ext cursor session (Hyprland implements it) | same | same protocol where implemented | PipeWire cursor metadata | `cursor_mode = METADATA` |
 | Input | `wayland/input.rs` virtual pointer bound to the output | same, bound to that output | same | RemoteDesktop portal `NotifyPointerMotionAbsolute(stream, x, y)` (what the third-party sender does, §4.4) | RemoteDesktop portal |
-| Remove output | IPC `output remove` | nothing | `swaymsg output <name> unplug` (*unverified*) | close the stream | close the session |
+| Remove output | IPC `output remove` | nothing | Sway IPC `output <name> unplug` (*verified*) | close the stream | close the session |
 
 ### 3.3 Backend detection at startup
 
@@ -232,9 +232,13 @@ this order, stopping at the first hit:
    `XDG_CURRENT_DESKTOP` alone (it is `Hyprland` here, but it is user-editable
    and absent in some launchers). `--instance <sig|index>` overrides the env
    for nested instances (§4.1).
-3. `SWAYSOCK` set → wlroots/Sway. Until that backend exists: "Sway is not
-   supported yet (#299); use `--output <name>` with an output you created
-   with `swaymsg create_output`", exit 2.
+3. `SWAYSOCK` set → wlroots/Sway, when the socket exists and the registry
+   has ext-image-copy-capture, `zwlr_virtual_pointer_manager_v1` and
+   `zwlr_output_manager_v1`; otherwise "this Sway lacks …; od-sender needs
+   Sway >= 1.10", exit 2. The lock key stays `od-<id>`; a record next to it
+   (`od-<id>.wlroots`: output name + `SWAYSOCK`) says which `HEADLESS-<n>` it
+   owns, so a restart reuses it and `clean` unplugs only recorded outputs of
+   dead senders.
 4. Wayland registry probe (`wayland/registry.rs`, one roundtrip): if
    `ext_image_copy_capture_manager_v1` (or `zwlr_screencopy_manager_v1`) and
    `zwlr_virtual_pointer_manager_v1` exist but no known output-creating IPC
@@ -636,7 +640,7 @@ with this one machine.
 | **Adopt / mirror mode as a user feature** (`--output <name>`, §3.7) | Docs, the `panel`-bounds-the-stream rule for mirror, a `list-outputs` helper; the code exists from step 1 | Here, trivially (`--output eDP-1` mirror; `--output` on a `hyprctl output create headless` the user made); niri/COSMIC/river volunteers get support "for free" |
 | **Cursor side channel** (`cursor`/`cursorImg`, UDP §6.3) | `wayland/cursor.rs` on the ext cursor session (Hyprland implements `ext_image_copy_capture_cursor_session_v1`, §2); `SenderSession` already does the UDP/ack dance | iPhone and Mac receiver here; the receiver's overlay shows cursor rate |
 | **Static FFmpeg (§3.5 C)** | `ffmpeg-sys-next` build features in CI, cache, licence note | CI; run the tarball here and in an Ubuntu container |
-| **Sway/wlroots backend** | `backend/wlroots`: `swaymsg create_output`, `output <name> mode --custom`, `unplug`; everything else is `wayland/*` as-is. `zwlr_output_manager_v1.set_custom_mode` on headless outputs still *unverified* (PLAN.md §2.1) | Nested sway under Hyprland (§4.2); CI headless sway job (§4.3) switches from `--output` to `--backend wlroots` |
+| **Sway/wlroots backend** | **Landed** (`backend/wlroots`): create/unplug over Sway IPC, size/scale/position through `zwlr_output_manager_v1`, everything else `wayland/*` as-is. CI's headless Sway job runs `dev smoke --backend wlroots`, a full `run --backend wlroots` into `od-receiver --sink none` (~58 fps, e2e p50 ~17 ms at 1024x768 locally) and a `kill -9` + `clean` cycle. Left: a real (DRM) Sway session, other wlroots compositors (no output creation: adopt only) | Nested sway under Hyprland (§4.2) for a GPU-backed run |
 | **KDE backend** | `backend/kde`: bind `zkde_screencast_unstable_v1` (>= v4), `stream_virtual_output_with_description`, PipeWire frames (`pipewire.rs`), RemoteDesktop portal input (or `org_kde_kwin_fake_input` if it is bindable, *unverified*), position via libkscreen D-Bus or KScreen's `kscreen-doctor`; portal+libkscreen fallback as in §4.4 | Plasma in an aarch64 VM on this box; CI `kwin_wayland --virtual` job (§4.3) |
 | **Portal backend (GNOME)** | `ashpd` ScreenCast `VIRTUAL` + `METADATA` cursor, `pipewire.rs`, RemoteDesktop input, restore tokens. Whether GNOME lets the app choose the virtual monitor's size is *unverified* (KDE does not, §3.2) | GNOME in an aarch64 VM; CI mutter headless job (§4.3) once the dialog question is solved |
 | **VA-API (Intel/AMD, x86_64)** | `FrameBuf::Dmabuf` via `zwp_linux_dmabuf_v1` + gbm allocation, `Kind::Vaapi` with DRM hwframes (wl-screenrec is the reference); ahead of x264 in auto order; PLAN.md Spike 0 | Not testable here. Needs the Intel Omarchy machine or a volunteer; ship behind `--encoder vaapi` first |
