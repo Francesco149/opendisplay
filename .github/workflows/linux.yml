@@ -76,6 +76,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # Detection and its tests must hold for builds without the optional
+      # backends too (the static tarball or a distro may drop them).
+      - name: Test od-sender without optional backends
+        run: cargo test -p od-sender --no-default-features
+
       - name: Build release binaries
         run: cargo build --workspace --release
 
@@ -163,16 +168,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # KWin's virtual outputs need OpenGL, which needs a render node. Some
+      # runner kernels ship no vgem module (6.17.0-1022-azure): that is a gap
+      # in the infrastructure, not a regression, so warn and skip.
       - name: Render node (vgem)
+        id: dri
         run: |
           sudo modprobe vgem || {
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
-            sudo modprobe vgem
-          }
-          ls -l /dev/dri
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+              sudo modprobe vgem
+          } || true
+          ls -l /dev/dri || true
+          if ls /dev/dri/renderD* >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::no render node on $(uname -r) (vgem unavailable); KDE smoke skipped"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: KDE smoke in an Arch container
+        if: steps.dri.outputs.available == 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/kde-smoke"
           docker run --rm --device /dev/dri \
