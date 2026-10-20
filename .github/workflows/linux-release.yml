@@ -122,7 +122,7 @@ jobs:
           bin=target/release/od-sender
           "$bin" --version
           for enc in x264 openh264 auto; do
-            "$bin" encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
+            "$bin" dev encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
           done
 
       - name: Package
