@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use opendisplay_proto::video::access_units;
 use openh264::OpenH264API;
 use openh264::encoder::{
@@ -13,6 +13,15 @@ use openh264::encoder::{
 use openh264::formats::{BgraSliceU8, YUVBuffer};
 
 use super::{Encoded, EncoderSettings};
+
+/// OpenH264 refuses larger frames, at the first `encode` rather than at
+/// creation; checking up front lets `auto` skip it cleanly.
+const MAX_LONG: u32 = 3840;
+const MAX_SHORT: u32 = 2160;
+
+fn supports(width: u32, height: u32) -> bool {
+    width.max(height) <= MAX_LONG && width.min(height) <= MAX_SHORT
+}
 
 pub struct OpenH264Encoder {
     inner: openh264::encoder::Encoder,
@@ -24,6 +33,12 @@ pub struct OpenH264Encoder {
 impl OpenH264Encoder {
     /// `width`/`height` are already even.
     pub fn new(width: u32, height: u32, s: EncoderSettings) -> Result<Self> {
+        if !supports(width, height) {
+            bail!(
+                "OpenH264 encodes at most {MAX_LONG}x{MAX_SHORT} \
+                 ({MAX_SHORT}x{MAX_LONG} portrait), not {width}x{height}"
+            );
+        }
         let cfg = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
@@ -89,5 +104,28 @@ impl OpenH264Encoder {
             captured_at,
             encode_ms: t0.elapsed().as_secs_f64() * 1000.0,
         }])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::Backend;
+
+    fn settings() -> EncoderSettings {
+        EncoderSettings {
+            backend: Backend::Openh264,
+            bitrate_bps: 8_000_000,
+            max_fps: 60.0,
+            threads: 1,
+        }
+    }
+
+    #[test]
+    fn refuses_frames_above_its_limit_at_creation() {
+        assert!(supports(3840, 2160) && supports(2160, 3840) && supports(2556, 1178));
+        assert!(!supports(4096, 2304) && !supports(2304, 4096) && !supports(3840, 2162));
+        let e = OpenH264Encoder::new(4096, 2304, settings()).err().unwrap();
+        assert!(e.to_string().contains("at most 3840x2160"), "{e}");
     }
 }
