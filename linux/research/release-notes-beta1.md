@@ -6,8 +6,10 @@ lines for the AUR and the tarballs, the linked FFmpeg/x264 versions, the
 source checksum for the AUR) when the tag is pushed. The text below is meant
 to replace or precede them with `gh release edit linux-v0.1.0-beta.1
 --notes-file …` once the release exists. Before publishing, re-check:
-Android (untested as of writing), the AUR package name being live, and the
-CI state of the smoke jobs.
+Android (first live session works, 2026-10-20; the functional checklist of
+touch, scroll, rotation, lock and quit is pending, so it is still "expected
+to work" below), the AUR package name being live, and the CI state of the
+smoke jobs.
 
 ---
 
@@ -29,7 +31,7 @@ experimental. Reports help a lot (see the end).
 | | |
 |---|---|
 | **Tested** | Omarchy / Hyprland 0.56 on aarch64 (Asahi Linux, M1 Pro), software x264. Receivers: iPhone, Mac receiver app (Intel iMac) |
-| **Expected to work** | Hyprland 0.55+ on any distro with an FFmpeg built with libx264 (otherwise the bundled OpenH264, slower); x86_64; iPad and Android (Google Play beta) as receivers |
+| **Expected to work** | Hyprland 0.55+ on any distro with an FFmpeg built with libx264 (otherwise the bundled OpenH264, slower); x86_64; iPad and Android (Google Play beta) as receivers. A first Android session (Pixel 10a, WiFi, 2424x1080) streamed at 53 fps with 33 ms end-to-end median latency (45 ms 95th percentile) |
 | **Experimental** | **Sway 1.10+**, **KDE Plasma 6.8+** (6.7 and older only with the packaged `/usr/bin/od-sender`), **GNOME 50+**. Each passes an automated test on a headless copy of the compositor in CI; none has run on a real desktop session yet |
 | **Your own output** | niri, COSMIC, river, labwc, Wayfire and similar: `od-sender run --output <name>` streams an output you created, if the compositor offers the screen-capture and virtual-pointer protocols (`od-sender doctor` shows them) |
 | **Not supported** | X11 sessions, Hyprland older than 0.55, Flatpak, USB cable, HEVC, Apple Pencil pressure (mapped to a plain pointer), audio, mirroring |
@@ -85,6 +87,10 @@ od-sender run             # first receiver found; or: od-sender run --to iPhone
   while the display exists (Plasma allows no negative positions); they move
   back when it goes, also after a crash (KWin 6.8 does that itself;
   `od-sender clean` is the fallback).
+* **Fractional scales are rounded by the desktop.** Hyprland only accepts
+  scales that give whole logical pixels, so a Pixel's 2.625 becomes 2.6667;
+  GNOME snaps to the scales it offers for the size (below). `od-sender`
+  accepts the scale the desktop chose.
 * **GNOME:** scale snaps to what GNOME offers for the size (an iPhone's 3
   becomes 2); setting scale or position applies a temporary display
   configuration that keeps your other monitors as they are.
