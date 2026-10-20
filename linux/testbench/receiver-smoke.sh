@@ -81,7 +81,7 @@ grep "listening on\|monitor HEADLESS" "$logdir/receiver.log" || true
 # The receiver's window is fullscreen on HEADLESS-1.
 rxwin() {
   swaymsg -t get_tree -r |
-    jq -c '.. | select((.app_id? // "") | test("^(app.opendisplay.Receiver|od-receiver)$")) | {app_id, fullscreen_mode, rect}'
+    jq -c '.. | select((.app_id? // "") | test("^app.opendisplay.Receiver$")) | {app_id, fullscreen_mode, rect}'
 }
 for _ in $(seq 50); do
   [ "$(rxwin | jq -r '.fullscreen_mode')" = 1 ] && break

@@ -21,6 +21,10 @@ use crate::input::{ScrollUnit, UserInput, VideoRect, scroll_to_video};
 use crate::video::VideoOutput;
 use crate::video::gst_out::GstOutput;
 
+/// The reverse-DNS id: the Wayland app_id, the Flatpak id and the desktop
+/// entry's name (`app.opendisplay.Receiver.desktop`) all match it.
+pub const APP_ID: &str = "app.opendisplay.Receiver";
+
 /// One monitor as GDK reports it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorFacts {
@@ -49,6 +53,9 @@ impl MonitorFacts {
 
 /// Initialise GTK on this (main) thread.
 pub fn init() -> Result<()> {
+    // GTK names the toplevel after the program unless told otherwise.
+    glib::set_prgname(Some(APP_ID));
+    glib::set_application_name("OpenDisplay Receiver");
     gtk::init().map_err(|e| anyhow!("initialising GTK: {e}"))
 }
 
@@ -331,7 +338,7 @@ pub fn run(
 ) -> Result<()> {
     let paintable = sink.property::<gdk::Paintable>("paintable");
     let app = gtk::Application::builder()
-        .application_id("app.opendisplay.Receiver")
+        .application_id(APP_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     let on_close = std::rc::Rc::new(on_close);
