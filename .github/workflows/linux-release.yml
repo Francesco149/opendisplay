@@ -9,9 +9,19 @@ name: Linux release
 #
 # The release is never marked "Latest": the website's Mac download buttons
 # resolve releases/latest/download/OpenDisplay.dmg.
+#
+# The binaries link a minimal static FFmpeg and x264 built by
+# linux/packaging/ffmpeg/build-static.sh, so they run on any glibc distro
+# whatever its FFmpeg (SENDER-PLAN §3.5 option C). Pull requests touching that
+# script or this file, and manual runs, build and smoke-test without releasing.
 on:
   push:
     tags: ["linux-v*"]
+  pull_request:
+    paths:
+      - "linux/packaging/ffmpeg/**"
+      - ".github/workflows/linux-release.yml"
+  workflow_dispatch:
 
 concurrency:
   group: linux-release-${{ github.ref }}
@@ -37,38 +47,83 @@ jobs:
         working-directory: linux
     env:
       TAG: ${{ github.ref_name }}
+      # Fixed path: build-static.sh bakes it into rustflags, and the cache
+      # restores it here.
+      FFMPEG_DIR: /home/runner/static-ffmpeg
     steps:
       - uses: actions/checkout@v6
 
-      # The sender only: Wayland and FFmpeg headers, libclang for bindgen,
-      # nasm for OpenH264's x86 assembly. No GStreamer.
+      # No FFmpeg or x264 packages: the static build brings its own, and their
+      # absence keeps the system ones out of the link. libclang for bindgen,
+      # nasm for x264's, FFmpeg's and OpenH264's x86 assembly.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libwayland-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libclang-dev \
-            nasm
+            pkg-config libclang-dev nasm
 
       - uses: dtolnay/rust-toolchain@stable
 
       # linux-v0.1.0-beta.1 must belong to crate version 0.1.0, so
       # `od-sender --version` names the release it came from.
-      - name: Check tag against crate version
+      - name: Version
         run: |
-          ver="${TAG#linux-v}"
           crate="$(cargo pkgid -p od-sender | sed 's/.*[#@]//')"
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "VERSION=${crate}-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          ver="${TAG#linux-v}"
           if [ "${ver%%-*}" != "$crate" ]; then
             echo "::error::tag $TAG does not match od-sender version $crate"
             exit 1
           fi
           echo "VERSION=$ver" >> "$GITHUB_ENV"
 
+      - name: Cache static FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FFMPEG_DIR }}
+          key: static-ffmpeg-${{ matrix.arch }}-${{ hashFiles('linux/packaging/ffmpeg/build-static.sh') }}
+
+      - name: Build static FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: packaging/ffmpeg/build-static.sh "$FFMPEG_DIR"
+
+      - name: Link against static FFmpeg
+        run: echo "RUSTFLAGS=$(cat "$FFMPEG_DIR/rustflags")" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --locked --release -p od-sender
 
       - name: Build
         run: cargo build --locked --release -p od-sender
+
+      # Only glibc, libgcc and libstdc++ (OpenH264 is C++) may be NEEDED; an
+      # FFmpeg or x264 soname here means the static link silently fell back.
+      - name: Check dynamic dependencies
+        run: |
+          bin=target/release/od-sender
+          readelf -d "$bin" | grep NEEDED
+          bad="$(readelf -d "$bin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' |
+            grep -Ev '^(libc|libm|libpthread|libdl|librt)\.so\.[0-9]+$|^libgcc_s\.so\.1$|^libstdc\+\+\.so\.6$|^ld-linux-(x86-64|aarch64)\.so\.[0-9]+$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::unexpected shared libraries: $bad"
+            exit 1
+          fi
+          echo "newest glibc symbol: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+
+      # Nothing here touches a compositor: the version, then each software
+      # encoder on synthetic frames. `auto` also proves h264_v4l2m2m is
+      # compiled in (it is tried first and falls back on a runner).
+      - name: Smoke test
+        run: |
+          bin=target/release/od-sender
+          "$bin" --version
+          for enc in x264 openh264 auto; do
+            "$bin" encode-bench --encoder "$enc" --width 640 --height 480 --frames 30
+          done
 
       - name: Package
         run: |
@@ -83,9 +138,6 @@ jobs:
           (cd "$RUNNER_TEMP/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           tar -tzvf "$RUNNER_TEMP/dist/$name.tar.gz"
           cat "$RUNNER_TEMP/dist/$name.tar.gz.sha256"
-          # Record what it links: these sonames are why the notes send Arch
-          # users to the AUR (SENDER-PLAN §3.5).
-          readelf -d target/release/od-sender | grep NEEDED
 
       - uses: actions/upload-artifact@v4
         with:
@@ -95,6 +147,7 @@ jobs:
 
   release:
     needs: build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -103,6 +156,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: linux/packaging/ffmpeg
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -116,14 +173,20 @@ jobs:
       # into the notes so bump.sh's result can be cross-checked.
       - name: Write release notes
         run: |
+          set -o pipefail  # a failed download must not hash to e3b0c442…
           ver="${TAG#linux-v}"
+          script=linux/packaging/ffmpeg/build-static.sh
+          ffmpeg_tag="$(sed -n 's/^FFMPEG_TAG=//p' "$script")"
+          x264_commit="$(sed -n 's/^X264_COMMIT=\([0-9a-f]*\).*/\1/p' "$script")"
           src_sha="$(curl -fsSL "https://github.com/${GH_REPO}/archive/refs/tags/${TAG}.tar.gz" | sha256sum | cut -d' ' -f1)"
           cat > notes.md <<EOF
           Linux sender (\`od-sender\`) ${ver}, beta. Wayland only; tested on Omarchy / Hyprland 0.55+.
 
-          **Arch Linux / Omarchy: install from the AUR** (\`yay -S opendisplay-sender\`). It builds against your system FFmpeg.
+          **Arch Linux / Omarchy:** \`yay -S opendisplay-sender\` (AUR; builds against your system FFmpeg and gets updates through your AUR helper).
 
-          The tarballs below are built on Ubuntu 24.04 against its FFmpeg 6.1 (\`libavcodec.so.60\`) and need that same FFmpeg major at run time, so they will not start on Arch or other distributions with a newer FFmpeg. Each contains \`od-sender\`, a desktop entry, a \`systemd --user\` template unit, the license, and \`PROTOCOL.md\`.
+          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed. Unpack, put \`od-sender\` on your \`PATH\`, and run \`od-sender run\`. Each tarball also has a desktop entry, a \`systemd --user\` template unit, the license (GPL-3.0; this build includes GPL x264), and \`PROTOCOL.md\`.
+
+          Linked-in sources: FFmpeg [${ffmpeg_tag}](https://github.com/FFmpeg/FFmpeg/tree/${ffmpeg_tag}) and x264 [${x264_commit:0:7}](https://code.videolan.org/videolan/x264/-/tree/${x264_commit}), configured by [\`build-static.sh\`](https://github.com/${GH_REPO}/blob/${TAG}/${script}).
 
           Source tarball sha256 (AUR): \`${src_sha}\`
           EOF
