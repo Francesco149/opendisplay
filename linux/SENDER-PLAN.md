@@ -423,10 +423,46 @@ uploads both logs. Jobs are gated on `paths` for their backend directory.
 
 | Compositor | How | Status | Notes |
 |---|---|---|---|
-| **Sway, headless** | `archlinux:latest` container on `ubuntu-24.04` (x86_64): `pacman -S sway pixman …`, `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c ci.conf &`, `swaymsg create_output`, `swaymsg output HEADLESS-2 mode --custom 640x480@60Hz`, then `dev smoke --output HEADLESS-2` (Adopt) and, once the backend exists, `--backend wlroots` | *plausible*; headless sway is routine in Wayland CI | Ubuntu 24.04's sway 1.9 predates `ext-image-copy-capture` (sway >= 1.10), hence the Arch container, which also matches the AUR target and lets the same job run `makepkg` on the PKGBUILD (exit criterion 4). Exercises `wayland/capture.rs` + `wayland/input.rs` **at beta**, before any Sway backend |
+| **Sway, headless** | `archlinux:latest` container on `ubuntu-24.04` (x86_64): `pacman -S sway pixman …`, `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway -c ci.conf &`, `swaymsg create_output`, `swaymsg output HEADLESS-2 mode --custom 640x480@60Hz`, then `dev smoke --output HEADLESS-2` (Adopt) and, once the backend exists, `--backend wlroots` | **verified** (sway 1.12, aarch64, 2026-10-20) with `linux/testbench/sway-smoke.sh`: `capture-test` + `input-test --output` pass; CI step in `linux.yml` `arch-package` (first run pending) | Ubuntu 24.04's sway 1.9 predates `ext-image-copy-capture` (sway >= 1.10), hence the Arch container, which also matches the AUR target and lets the same job run `makepkg` on the PKGBUILD (exit criterion 4). Exercises `wayland/capture.rs` + `wayland/input.rs` **at beta**, before any Sway backend |
 | **Hyprland, headless** | — | *not feasible* on GPU-less hosted runners (§4.1: allocator needs a DRM fd) | The Hyprland backend's IPC layer gets unit tests against recorded `hyprctl` JSON instead; live coverage is the nested harness here |
 | **Mutter (GNOME), headless** | `ubuntu-24.04`: `apt install mutter xdg-desktop-portal-gnome pipewire`, `mutter --wayland --no-x11 --headless --virtual-monitor 1280x720 &` under a session bus, then `dev smoke --backend portal` | *plausible*: Mutter's headless native backend with `--virtual-monitor` exists since GNOME 40 and has been run on GitHub Actions (Eclipse CBI example); whether the GNOME portal's chooser can be bypassed non-interactively (restore token pre-seeding, or talking to `org.gnome.Mutter.ScreenCast`/`RemoteDesktop` directly in CI) is *unverified* and the main open question for that job | Lands with the portal backend |
 | **KWin, virtual** | `kwin_wayland --virtual` with PipeWire running, then `dev smoke --backend kde` via `zkde_screencast_unstable_v1.stream_virtual_output` (no chooser dialog on that path) | *plausible*: the virtual backend exists (`kwin-wayland-backend-virtual` on older Ubuntu; built in on Plasma 6, *unverified*); binding rules for the zkde protocol *unverified* | Lands with the KDE backend |
+
+**Sway headless findings** (*verified* on sway 1.12 / wlroots 0.20, pixman
+renderer, headless backend, no GPU, isolated `XDG_RUNTIME_DIR`; they feed the
+future wlroots backend):
+
+* Globals: `ext_image_copy_capture_manager_v1` v1 and
+  `ext_output_image_capture_source_manager_v1` v1 (so `capture.rs` works
+  unchanged; `zwlr_screencopy_manager_v1` v3 is there too, unused),
+  `zwlr_virtual_pointer_manager_v1` **v2** (so `create_virtual_pointer_with_output`
+  binds motion to our output), `zwp_virtual_keyboard_manager_v1` v1,
+  `zwlr_output_manager_v1` v4, `zwlr_output_power_manager_v1`,
+  `ext_foreign_toplevel_image_capture_source_manager_v1`.
+* Outputs: the headless backend starts with `HEADLESS-1`; `swaymsg
+  create_output` adds the next one at 1920x1080 with refresh 0. Names are
+  never reused (after unplugging `HEADLESS-3` the next is `HEADLESS-4`), so
+  find the new output by diffing `get_outputs`, never by guessing.
+  `swaymsg output <name> unplug` removes it. `swaymsg -- output <name> mode
+  --custom 640x480@60Hz` needs the `--` (swaymsg otherwise parses `--custom`).
+* `zwlr_output_manager_v1` applies custom modes, scale and position to a
+  headless output (`wlr-randr --custom-mode 1024x768@75Hz --scale 2 --pos
+  0,800` took effect), so a wlroots backend can size its output through the
+  protocol instead of compositor IPC; only creating and removing it needs
+  `swaymsg`.
+* Capture yields frames on damage only: a static output gives one frame in
+  3 s; with a terminal redrawing, 180-183 frames in 3 s at 60 Hz (p50 16.4 ms)
+  at 640x480 Xrgb8888. Changing the mode mid-capture produced one
+  `BufferConstraints` failure, which `capture.rs` recovered from; unplugging
+  the output mid-capture left Sway running (unlike the Hyprland
+  reconfigure-under-capture crash, §5 step 4).
+* Input: absolute motion from the output-bound virtual pointer lands at the
+  right normalised position (checked through focus-follows-mouse on two
+  side-by-side windows). Sway ignores the very first pointer motion after it
+  starts for focus, so the smoke test warms up once.
+* `input-test --output <name>` (added for this) adopts an existing output on
+  any compositor with the virtual pointer protocol; without it the command
+  still needs Hyprland IPC to create its output and read `cursorpos`.
 
 ### 4.4 What the third-party Linux sender teaches (`tixwho/opendisplay-linux`)
 
