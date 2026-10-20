@@ -63,8 +63,8 @@ od-sender run             # first receiver found; or: od-sender run --to iPhone
   one of yours); `--position`, `--scale` (`passthrough`, `mac` or a number),
   `--max-fps`, `--bitrate-mbps`, `--encoder`.
 * Encoder picked at run time: V4L2 hardware where a driver exists, else x264,
-  else the bundled OpenH264. Frame rate follows the receiver's panel (120 Hz
-  on ProMotion devices).
+  else the bundled OpenH264. Up to 60 fps, like the Mac sender; higher only
+  when the receiver's decoder advertises it (`videoCaps`).
 * Touch and scroll from the receiver; rotation rebuilds the display after a
   short settle; the receiver locking or quitting is handled.
 * Reconnects after WiFi drops with backoff; recreates the display if it is

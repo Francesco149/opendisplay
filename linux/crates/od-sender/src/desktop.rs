@@ -433,10 +433,10 @@ impl Limits {
         if let Some(pps) = pps {
             size = fit_pixels(size, pps)?;
         }
-        let mut fps = self.target_fps;
-        if let Some(max) = cap.and_then(|c| c.max_frame_rate) {
-            fps = fps.min(max);
-        }
+        // The panel rate is a display fact, not a decoder promise (§6.1):
+        // above the legacy 60 only when this H.264 entry says so.
+        let decoder_fps = cap.and_then(|c| c.max_frame_rate).unwrap_or(DEFAULT_FPS);
+        let mut fps = self.target_fps.min(decoder_fps);
         if let Some(pps) = pps {
             fps = fps.min(u32::try_from(pps / size.pixels()).unwrap_or(u32::MAX));
         }
@@ -842,13 +842,32 @@ mod tests {
             max_fps: Some(30.0),
         };
         assert_eq!(plan(&h, &o).unwrap().stream.fps, 30);
-        // Without videoCaps the legacy contract has no rate cap, but High@L5.2
-        // does: 21,888 macroblocks allow 94 fps, minus one of headroom.
+        // A 120 Hz panel is a display fact, not a decoder promise: the
+        // legacy contract (no videoCaps) streams at most 60, like the Mac.
         h.video_caps = None;
-        assert_eq!(plan(&h, &PASS).unwrap().stream.fps, 93);
+        let p = plan(&h, &PASS).unwrap();
+        assert_eq!((p.output.hz, p.stream.fps), (120, 60));
         let mut small = fixture!("iphone-15-pro-landscape");
         small.video_caps = None;
+        assert_eq!(plan(&small, &PASS).unwrap().stream.fps, 60);
+        // An H.264 entry promising 120 lifts the cap up to the panel rate...
+        let h264_at = |fps| {
+            Some(vec![VideoCap {
+                codec: "h264".into(),
+                max_width: None,
+                max_height: None,
+                max_frame_rate: Some(fps),
+                max_pixels_per_second: None,
+            }])
+        };
+        small.video_caps = h264_at(120);
         assert_eq!(plan(&small, &PASS).unwrap().stream.fps, 120);
+        small.video_caps = h264_at(240);
+        assert_eq!(plan(&small, &PASS).unwrap().stream.fps, 120, "panel rate");
+        // ...and High@L5.2 still bounds it: 21,888 macroblocks allow 94 fps,
+        // minus one of headroom.
+        h.video_caps = h264_at(120);
+        assert_eq!(plan(&h, &PASS).unwrap().stream.fps, 93);
         // Absent displayMaxFrameRate is the legacy 60.
         h.display_max_frame_rate = None;
         let p = plan(&h, &PASS).unwrap();

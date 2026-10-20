@@ -92,8 +92,8 @@ enum Cmd {
         /// Target bitrate [default: 20, or the config file's].
         #[arg(long)]
         bitrate_mbps: Option<f32>,
-        /// Frame-rate cap; default: the receiver's `displayMaxFrameRate`
-        /// (120 on ProMotion), never above it.
+        /// Frame-rate cap; default: 60, or up to the receiver's panel rate
+        /// when its decoder advertises more (never above either).
         #[arg(long)]
         max_fps: Option<f32>,
         /// Output scale: `passthrough` (the receiver's own scale), `mac`
