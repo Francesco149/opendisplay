@@ -62,10 +62,13 @@ fn lenient_opt_u64<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Er
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
-    #[serde(deserialize_with = "lenient_u32")]
+    // Deprecated by `panel` and removed at the next bump (§6.1): absent
+    // parses as 0, which the sender's plan only accepts with a valid panel.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub pixels_wide: u32,
-    #[serde(deserialize_with = "lenient_u32")]
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub pixels_high: u32,
+    #[serde(default)]
     pub scale: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
@@ -695,6 +698,18 @@ mod tests {
         assert_eq!(h.power, None);
         let h = hello(r#"{"type":"hello","pixelsWide":5120,"pixelsHigh":2880,"scale":2}"#);
         assert_eq!(h.power, None);
+    }
+
+    /// The next bump drops the deprecated fields (§6.1); such a `hello`
+    /// must still parse, with the panel carrying the facts.
+    #[test]
+    fn a_panel_only_hello_parses() {
+        let h = hello(
+            r#"{"type":"hello","pv":4,"panel":{"pixelsWide":2556,"pixelsHigh":1179,"scale":3}}"#,
+        );
+        assert_eq!((h.pixels_wide, h.pixels_high, h.scale), (0, 0, 0.0));
+        let f = h.panel_facts().expect("panel facts");
+        assert_eq!((f.pixels_wide, f.pixels_high, f.scale), (2556, 1179, 3.0));
     }
 
     #[test]

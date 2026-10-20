@@ -13,6 +13,8 @@ pub struct Window {
     e2e_ms: Vec<f64>,
     /// Sender send -> arrival, ms (network + queueing).
     net_ms: Vec<f64>,
+    /// Push to the decoder -> frame at the sink, ms (decode + queue).
+    dec_ms: Vec<f64>,
     /// Decoder push failures.
     decode_errors: u64,
 }
@@ -26,6 +28,7 @@ impl Default for Window {
             idrs: 0,
             e2e_ms: Vec::new(),
             net_ms: Vec::new(),
+            dec_ms: Vec::new(),
             decode_errors: 0,
         }
     }
@@ -55,6 +58,10 @@ impl Window {
         }
     }
 
+    pub fn decoded(&mut self, ms: f64) {
+        self.dec_ms.push(ms);
+    }
+
     pub fn decode_error(&mut self) {
         self.decode_errors += 1;
     }
@@ -81,6 +88,13 @@ impl Window {
         }
         if let Some(p) = percentile(&mut self.net_ms, 0.5) {
             m.insert("net50".into(), round1(p).into());
+        }
+        // Named as the Mac receiver names its decode time.
+        if let Some(p) = percentile(&mut self.dec_ms, 0.5) {
+            m.insert("dec50".into(), round1(p).into());
+        }
+        if let Some(p) = percentile(&mut self.dec_ms, 0.95) {
+            m.insert("dec95".into(), round1(p).into());
         }
         *self = Window::default();
         serde_json::Value::Object(m)

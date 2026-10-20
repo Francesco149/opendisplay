@@ -426,8 +426,17 @@ pub fn capture_shm(
         ext_image_copy_capture_manager_v1::Options::empty()
     };
     let session = capture_mgr.create_session(&source, options, &qh, ());
+    // Bounded and watching `stop`, so a joiner is never stuck behind a
+    // compositor that does not describe the session.
+    let setup_deadline = Instant::now() + Duration::from_secs(5);
     while !st.session.done {
-        queue.blocking_dispatch(&mut st)?;
+        if stop.load(Ordering::Relaxed) {
+            return Ok(0);
+        }
+        if Instant::now() >= setup_deadline {
+            bail!("the compositor did not describe the capture session within 5 s");
+        }
+        dispatch_with_timeout(&conn, &mut queue, &mut st, Duration::from_millis(100))?;
         if st.session.stopped {
             bail!("capture session stopped by the compositor");
         }

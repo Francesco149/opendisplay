@@ -1,4 +1,4 @@
-# Runs the receiver in the graphical session, fullscreen on the default output.
+# Runs the receiver in the graphical session, fullscreen on the first monitor.
 #   systemctl --user enable --now od-receiver
 # Override arguments with `systemctl --user edit od-receiver`.
 [Unit]

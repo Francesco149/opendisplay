@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use opendisplay_proto::control::StreamConfig;
+use opendisplay_proto::control::{CursorImg, StreamConfig};
 use opendisplay_proto::video::{AccessUnit, SpsInfo, VideoFrame, access_units};
 use opendisplay_session::Now;
 use opendisplay_session::sender::{SenderAction, SenderConfig, SenderEvent, SenderSession};
@@ -79,6 +79,9 @@ pub struct Summary {
     pub keyframe_requests: u64,
     pub touches: u64,
     pub stats_received: u64,
+    /// `sleeping` / `closing` from the receiver (§6.1).
+    pub sleeping_received: u32,
+    pub closing_received: u32,
 }
 
 pub async fn run(opts: Options) -> Result<Summary> {
@@ -156,6 +159,7 @@ async fn session(
     let mut window_bytes = 0u64;
     let mut window_start = Instant::now();
     let mut cursor_angle = 0f64;
+    let mut sprite_sent = false;
 
     loop {
         let paused = paused_until.is_some_and(|u| Instant::now() < u);
@@ -224,7 +228,14 @@ async fn session(
             }
             _ = cursor_tick.tick(), if opts.cursor && sess.ready_for_video() && !paused => {
                 cursor_angle += std::f64::consts::TAU / 600.0;
-                sess.cursor(now(start), 0.5 + 0.3 * cursor_angle.cos(), 0.5 + 0.3 * cursor_angle.sin(), true)
+                let mut a = Vec::new();
+                // The sprite first, as the official sender does on connect (§6.2).
+                if !sprite_sent {
+                    sprite_sent = true;
+                    a.push(sess.cursor_image(arrow()));
+                }
+                a.extend(sess.cursor(now(start), 0.5 + 0.3 * cursor_angle.cos(), 0.5 + 0.3 * cursor_angle.sin(), true));
+                a
             }
             _ = stats_tick.tick() => {
                 let el = window_start.elapsed().as_secs_f64().max(1e-3);
@@ -316,8 +327,14 @@ async fn apply(
                 summary.stats_received += 1;
                 info!("PHONE-STATS {v}");
             }
-            SenderAction::ReceiverSleeping => info!("receiver sleeping"),
-            SenderAction::ReceiverClosing => info!("receiver closing"),
+            SenderAction::ReceiverSleeping => {
+                summary.sleeping_received += 1;
+                info!("receiver sleeping");
+            }
+            SenderAction::ReceiverClosing => {
+                summary.closing_received += 1;
+                info!("receiver closing");
+            }
             SenderAction::Close(reason) => {
                 warn!("closing: {reason:?}");
                 return Ok(());
@@ -326,4 +343,16 @@ async fn apply(
         }
     }
     Ok(())
+}
+
+/// A 16x16 arrow (black outline, white fill) for `cursorImg`, sized for a
+/// 1280-wide 16:9 display; the hotspot is its tip.
+fn arrow() -> CursorImg {
+    CursorImg {
+        nw: 16.0 / 1280.0,
+        nh: 16.0 / 720.0,
+        ax: 0.0,
+        ay: 0.0,
+        png: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAATklEQVR42rWTSQoAIAwD8/9Pj3gQqmjpgnNu5hBSSUJN6EqYdCQsqhIsFQknWQk3MhJeRCV4RCRekMhOtlC5AxPId3AclgT/1tn6kUh4AM1S3yGfcJMzAAAAAElFTkSuQmCC".into(),
+    }
 }

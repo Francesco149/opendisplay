@@ -13,6 +13,10 @@ use super::wlroots::WlrootsBackend;
 use super::{Backend, BackendId};
 use crate::wayland::registry::Snapshot;
 
+/// The README's support table, for refusals.
+pub const README_SETUPS: &str =
+    "https://github.com/peetzweg/opendisplay/blob/main/linux/README.md#supported-setups";
+
 pub const ISSUE: &str = "https://github.com/peetzweg/opendisplay/issues/299";
 
 /// The process environment detection reads.
@@ -335,7 +339,7 @@ pub fn decide(
     done(
         steps,
         Decision::Unsupported(hyprland_hint(format!(
-            "no supported compositor found ({desktop}); od-sender supports Hyprland >= 0.55 for now ({ISSUE})"
+            "no supported compositor found ({desktop}). od-sender creates displays on Hyprland 0.55+, Sway 1.10+, KDE Plasma 6.8+ and GNOME 50+; on other Wayland compositors pass --output <name> to use an output you created. See {README_SETUPS}"
         ))),
     )
 }
@@ -405,7 +409,7 @@ pub fn instantiate(decision: Decision) -> Result<Box<dyn Backend>> {
         Decision::Hyprland { socket } => Ok(Box::new(HyprlandBackend::connect(socket)?)),
         Decision::Wlroots { swaysock } => Ok(Box::new(WlrootsBackend::connect(swaysock)?)),
         #[cfg(feature = "kde")]
-        Decision::Kde => Ok(Box::new(super::kde::KdeBackend)),
+        Decision::Kde => Ok(Box::<super::kde::KdeBackend>::default()),
         #[cfg(not(feature = "kde"))]
         Decision::Kde => Err(anyhow!(Unsupported("built without KDE support".into()))),
         #[cfg(feature = "gnome")]

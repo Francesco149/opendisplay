@@ -112,12 +112,31 @@ fn now(start: Instant) -> Now {
 }
 
 /// The output for a receiver with this `hello.id` (equal to its Bonjour TXT
-/// `id`, PROTOCOL §2.1): `od-<first 6 chars>`; also the lock key.
+/// `id`, PROTOCOL §2.1): `od-<first 6 chars>`; also the lock key. The id is
+/// receiver-supplied and the name reaches compositor IPC, Lua and a file
+/// path, so an id whose first 6 characters are not all `[a-z0-9]` (after
+/// lower-casing) is named by a hash of the whole id instead.
 pub fn output_name(id: Option<&str>) -> String {
-    let short = id
-        .map(|s| s.chars().take(6).collect::<String>().to_lowercase())
-        .unwrap_or_else(|| "anon".into());
-    format!("od-{short}")
+    let Some(id) = id.filter(|s| !s.is_empty()) else {
+        return "od-anon".into();
+    };
+    let short: String = id.chars().take(6).collect::<String>().to_lowercase();
+    let plain = short.len() == 6
+        && short
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    if plain {
+        format!("od-{short}")
+    } else {
+        format!("od-{:06x}", fnv1a(id.as_bytes()) & 0xff_ffff)
+    }
+}
+
+/// 32-bit FNV-1a; stable across builds, unlike `DefaultHasher`.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    bytes.iter().fold(0x811c_9dc5, |h, &b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// What a `hello` asks the backend for: the desktop plan plus where and
@@ -365,6 +384,8 @@ struct Active {
     cursor: CursorSide,
     /// The newest position while `Pending`, sent once the channel is live.
     held_position: Option<(f64, f64)>,
+    /// Which `build` made this; a drift result for an older one is stale.
+    generation: u64,
 }
 
 /// The cursor side channel for one display.
@@ -489,6 +510,7 @@ fn build(
         place_workspace(backend, &display.info().name, ws);
     }
     let stream = stream_for(display.info(), &target);
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     *active = Some(Active {
         input,
         display,
@@ -496,6 +518,7 @@ fn build(
         target,
         cursor: side,
         held_position: None,
+        generation: GENERATION.fetch_add(1, Ordering::Relaxed),
     });
     Ok(stream)
 }
@@ -793,6 +816,21 @@ fn cursor_out(sess: &mut SenderSession, now: Now, ev: CursorEvent) -> Vec<Sender
     }
 }
 
+/// A drift probe running on a blocking thread, for the display `build`
+/// generation it was taken from.
+type DriftCheck = (u64, tokio::task::JoinHandle<Option<String>>);
+
+/// The result of the running drift probe; pending while none runs.
+/// Cancel-safe: the slot is cleared only once the probe has finished.
+async fn drift_done(slot: &mut Option<DriftCheck>) -> (u64, Option<String>) {
+    let Some((_, probe)) = slot.as_mut() else {
+        return std::future::pending().await;
+    };
+    let why = probe.await.unwrap_or(None);
+    let (generation, _) = slot.take().expect("checked above");
+    (generation, why)
+}
+
 async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -811,8 +849,37 @@ async fn apply<S: AsyncWrite + Unpin>(
     cursor: Option<&mpsc::UnboundedSender<CursorEvent>>,
 ) -> Result<()> {
     info!("plan: {}", target.plan);
+    let position = target.spec.position;
     let plan = build(backend, active, target, opts, cursor)?;
+    if let (Some(a), Some(h)) = (active.as_ref(), sess.hello()) {
+        info!(
+            "{}",
+            extending_line(&receiver_label(h), a.display.info(), position)
+        );
+    }
     send_stream_config(stream, sess, &plan).await
+}
+
+/// The one plain-language line a user looks for after `run`.
+fn extending_line(receiver: &str, info: &DisplayInfo, position: Position) -> String {
+    let scale = info.scale.max(0.1);
+    let (lw, lh) = (
+        (info.width as f64 / scale).round(),
+        (info.height as f64 / scale).round(),
+    );
+    let place = match position {
+        Position::AutoRight => "right of your other displays".to_string(),
+        Position::AutoLeft => "left of your other displays".to_string(),
+        Position::AutoUp => "above your other displays".to_string(),
+        Position::AutoDown => "below your other displays".to_string(),
+        Position::At(x, y) => format!("at {x},{y}"),
+    };
+    let scale = format!("{:.2}", info.scale);
+    let scale = scale.trim_end_matches('0').trim_end_matches('.');
+    format!(
+        "Extending onto {receiver}: {lw}x{lh} logical at {scale}x ({}, {place}). Ctrl+C to stop.",
+        info.name
+    )
 }
 
 async fn session<S: AsyncRead + AsyncWrite + Unpin>(
@@ -845,6 +912,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     // the budget the sender stops fighting and leaves it as configured.
     let mut drifts = LossBudget::default();
     let mut drift_given_up = false;
+    // Compositor IPC: off the session thread, one at a time.
+    let mut drift_check: Option<DriftCheck> = None;
     let mut buf = vec![0u8; 64 * 1024];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut stats_tick = tokio::time::interval(Duration::from_secs(5));
@@ -953,8 +1022,19 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ = tick.tick() => {
                     if opts.duration.is_some_and(|d| start.elapsed() >= d) { return Ok(SessionEnd::Ended); }
-                    let why = if drift_given_up { None } else { active.as_mut().and_then(|a| a.display.drifted()) };
-                    if let Some(why) = why {
+                    if !drift_given_up && drift_check.is_none() {
+                        if let Some(a) = active.as_mut() {
+                            if let Some(probe) = a.display.drift_probe() {
+                                drift_check = Some((a.generation, tokio::task::spawn_blocking(probe)));
+                            }
+                        }
+                    }
+                    sess.handle(now(start), SenderEvent::Tick)
+                }
+                (generation, why) = drift_done(&mut drift_check) => {
+                    // A rebuild since the probe started makes its answer stale.
+                    let current = active.as_ref().is_some_and(|a| a.generation == generation);
+                    if let Some(why) = why.filter(|_| current && !drift_given_up) {
                         let target = active.as_ref().map(|a| a.target.clone()).expect("drift implies active");
                         let spec = &target.spec;
                         if drifts.allow(Instant::now()) {
@@ -975,7 +1055,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             warn!("{why}: {} keeps changing; leaving it as the compositor configured it", spec.name);
                         }
                     }
-                    sess.handle(now(start), SenderEvent::Tick)
+                    vec![]
                 }
                 _ = stats_tick.tick() => {
                     win_enc_ms.sort_by(f64::total_cmp);
@@ -990,6 +1070,7 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                     vec![]
                 }
             };
+            let mut apply_now: Option<(Target, String)> = None;
             for a in actions {
                 match a {
                     SenderAction::Send(bytes) => stream.write_all(&bytes).await.context("write")?,
@@ -1028,11 +1109,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                             return Ok(SessionEnd::LockConflict { held, receiver: receiver_label(&h) });
                         }
                         // The first plan applies at once; re-sent hellos settle first (§6.1).
+                        // At once means after this batch: `welcome` (and any
+                        // `updateRequired`) go out before the streamConfig.
                         if let Some(t) = debounce.on_hello(t, Instant::now()) {
-                            let cur = cursor_for(&ropts, backend, &sess);
-                            if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
-                                return conflict_or(e, receiver_label(&h));
-                            }
+                            apply_now = Some((t, receiver_label(&h)));
                         }
                     }
                     SenderAction::RequestKeyframe => {
@@ -1071,6 +1151,12 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
             if !sess.is_connected() {
                 return Ok(SessionEnd::Ended);
             }
+            if let Some((t, receiver)) = apply_now {
+                let cur = cursor_for(&ropts, backend, &sess);
+                if let Err(e) = apply(&mut stream, &sess, backend, &mut active, t, &ropts, cur.as_ref()).await {
+                    return conflict_or(e, receiver);
+                }
+            }
         }
     }
     .await;
@@ -1091,6 +1177,39 @@ mod tests {
 
     use super::*;
     use crate::backend::{BackendId, Caps};
+
+    #[test]
+    fn output_names_are_safe_for_ipc_lua_and_paths() {
+        // A UUID keeps its readable prefix, as before.
+        assert_eq!(
+            output_name(Some("3F31ED2A-0C1B-4D6E-9F00-123456789ABC")),
+            "od-3f31ed"
+        );
+        assert_eq!(output_name(None), "od-anon");
+        assert_eq!(output_name(Some("")), "od-anon");
+        for hostile in [
+            "\"})--x",
+            "a b c d e f",
+            "../../x",
+            "ab\ncd\nef",
+            "ÄÖÜäöü",
+            "abc",
+        ] {
+            let n = output_name(Some(hostile));
+            let suffix = n.strip_prefix("od-").unwrap();
+            assert_eq!(suffix.len(), 6, "{hostile:?} -> {n}");
+            assert!(
+                suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "{hostile:?} -> {n}"
+            );
+        }
+        // Stable across runs and builds (the lock key depends on it), and
+        // ids differing after the prefix are told apart when hashed.
+        assert_eq!(output_name(Some("a b c")), output_name(Some("a b c")));
+        assert_ne!(output_name(Some("a b c1")), output_name(Some("a b c2")));
+    }
 
     fn opts() -> RunOptions {
         RunOptions {
@@ -1172,8 +1291,12 @@ mod tests {
         sink: Arc<Mutex<Option<FrameSink>>>,
         fail_reconfigure: Arc<AtomicBool>,
         panic_on_input: Arc<AtomicBool>,
-        /// Reported once by the next `drifted()` while a display exists.
+        /// Reported once by the next drift probe while a display exists.
         drift: Arc<Mutex<Option<String>>>,
+        /// How long that probe blocks, like IPC to a slow compositor.
+        drift_delay: Arc<Mutex<Duration>>,
+        /// The size of the display being captured.
+        capture_size: Arc<Mutex<(u32, u32)>>,
         cursor_sink: Arc<Mutex<Option<crate::backend::CursorSink>>>,
         painted: Arc<Mutex<Option<bool>>>,
     }
@@ -1243,8 +1366,13 @@ mod tests {
     }
 
     impl VirtualDisplay for FakeDisplay {
-        fn drifted(&mut self) -> Option<String> {
-            self.0.drift.lock().unwrap().take()
+        fn drift_probe(&mut self) -> Option<crate::backend::DriftProbe> {
+            let why = self.0.drift.lock().unwrap().take()?;
+            let delay = *self.0.drift_delay.lock().unwrap();
+            Some(Box::new(move || {
+                std::thread::sleep(delay);
+                Some(why)
+            }))
         }
         fn info(&self) -> &DisplayInfo {
             &self.1
@@ -1261,6 +1389,7 @@ mod tests {
         }
         fn start_capture(&mut self, o: CaptureOptions, sink: FrameSink) -> Result<()> {
             *self.0.painted.lock().unwrap() = Some(o.cursor);
+            *self.0.capture_size.lock().unwrap() = (self.1.width, self.1.height);
             if self.0.cursor_sink.lock().unwrap().is_some() {
                 self.0.log(format!("start_capture painted={}", o.cursor));
             } else {
@@ -1302,7 +1431,7 @@ mod tests {
     /// in parallel. Returns the hello and the output name.
     fn test_hello(tag: &str) -> (Hello, String) {
         let id = format!("{tag}{:06x}-test", std::process::id());
-        let name = format!("od-{}", &id[..6]);
+        let name = output_name(Some(&id));
         (
             Hello {
                 id: Some(id),
@@ -1401,6 +1530,19 @@ mod tests {
         let (log, _, end) = drive(hello, losses, fail_reconfigure).await;
         forget_lock(&name);
         (log, end, name)
+    }
+
+    /// §9's sequence: `welcome` answers the first `hello` before the display
+    /// is built and its streamConfig sent.
+    #[tokio::test]
+    async fn welcome_goes_out_before_the_first_stream_config() {
+        let (hello, name) = test_hello("wf");
+        let (_, seen, _) = drive(hello, 0, false).await;
+        forget_lock(&name);
+        let at = |f: fn(&ReceiverAction) -> bool| seen.iter().position(f).expect("present");
+        let welcome = at(|a| matches!(a, ReceiverAction::Welcome(_)));
+        let config = at(|a| matches!(a, ReceiverAction::StreamConfig(_)));
+        assert!(welcome < config, "{seen:?}");
     }
 
     #[tokio::test]
@@ -1564,6 +1706,216 @@ mod tests {
     /// fake's shared state.
     /// The compositor changed the display (a Hyprland config reload): the
     /// session rebuilds it from the same spec and announces the stream again.
+    /// One captured frame of the display's size, as a compositor delivers it.
+    fn push_frame(shared: &Shared, shade: u8) -> bool {
+        let (w, h) = *shared.capture_size.lock().unwrap();
+        let mut sink = shared.sink.lock().unwrap();
+        let Some(sink) = sink.as_mut() else {
+            return false;
+        };
+        sink(CaptureEvent::Frame(crate::backend::Frame {
+            captured_at: Instant::now(),
+            presentation_ns: None,
+            buf: crate::backend::FrameBuf::Cpu {
+                pixels: crate::backend::Pixels::Owned(vec![shade; (w * h * 4) as usize]),
+                width: w,
+                height: h,
+                stride: w * 4,
+                format: crate::backend::PixelFormat::Xrgb8888,
+            },
+        }));
+        true
+    }
+
+    /// A small receiver, so the real encoder in these tests stays quick.
+    fn small_hello(tag: &str) -> (Hello, String) {
+        let (h, name) = test_hello(tag);
+        (
+            Hello {
+                pixels_wide: 640,
+                pixels_high: 360,
+                scale: 1.0,
+                display_max_frame_rate: Some(60),
+                ..h
+            },
+            name,
+        )
+    }
+
+    /// The whole session against the stub backend over an in-memory pipe,
+    /// with the real encoder: hello, build, streamConfig, an IDR reaching
+    /// the receiver; the output lost and rebuilt with a new streamConfig
+    /// and IDR; then the receiver's `closing` ends the run and the display
+    /// is closed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_streams_rebuilds_and_ends_on_closing() {
+        let (hello, name) = small_hello("e2");
+        let shared = Shared::default();
+        let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 20);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut backend = FakeBackend(shared.clone());
+        let task = tokio::spawn(async move {
+            let mut budget = LossBudget::default();
+            let o = RunOptions {
+                encoder: crate::encoder::Backend::Openh264,
+                ..opts()
+            };
+            session(
+                sender_io,
+                &mut backend,
+                &o,
+                Instant::now(),
+                shutdown_rx,
+                &mut budget,
+                None,
+            )
+            .await
+        });
+        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello));
+        let rx_now = || Now::new(Duration::from_secs(1), 1e6);
+        for a in rx.handle(rx_now(), ReceiverEvent::Connected) {
+            if let ReceiverAction::Send(b) = a {
+                receiver_io.write_all(&b).await.unwrap();
+            }
+        }
+        // configs and IDRs seen, in order: "config" / "idr".
+        let mut seen: Vec<&str> = Vec::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut shade = 0u8;
+        while seen.iter().filter(|s| **s == "idr").count() < 2 {
+            assert!(Instant::now() < deadline, "stalled after {seen:?}");
+            match tokio::time::timeout(Duration::from_millis(20), receiver_io.read(&mut buf)).await
+            {
+                Ok(n) => {
+                    let n = n.unwrap();
+                    assert!(n > 0, "sender hung up after {seen:?}");
+                    for a in rx.handle(rx_now(), ReceiverEvent::Bytes(&buf[..n])) {
+                        match a {
+                            ReceiverAction::StreamConfig(_) => seen.push("config"),
+                            ReceiverAction::Video(v)
+                                if v.is_idr && seen.last() == Some(&"config") =>
+                            {
+                                seen.push("idr");
+                                if seen.len() == 2 {
+                                    // The output goes away under the capture.
+                                    let mut sink =
+                                        shared.sink.lock().unwrap().take().expect("capturing");
+                                    sink(CaptureEvent::Ended("output removed".into()));
+                                }
+                            }
+                            ReceiverAction::Send(b) => receiver_io.write_all(&b).await.unwrap(),
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => {
+                    shade = shade.wrapping_add(17);
+                    push_frame(&shared, shade);
+                }
+            }
+        }
+        assert_eq!(seen, ["config", "idr", "config", "idr"]);
+        if let ReceiverAction::Send(b) =
+            rx.control(&opendisplay_proto::control::ControlMessage::Closing)
+        {
+            receiver_io.write_all(&b).await.unwrap();
+        }
+        let end = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("closing did not end the session")
+            .unwrap()
+            .unwrap();
+        forget_lock(&name);
+        assert_eq!(end, SessionEnd::ReceiverClosed);
+        let log = shared.entries();
+        assert_eq!(
+            log,
+            [
+                format!("open {name}").as_str(),
+                "start_capture",
+                "reconfigure",
+                "start_capture",
+                "stop_capture",
+                "close keep=false",
+            ]
+        );
+    }
+
+    /// Compositor IPC for the drift check runs off the session thread: a
+    /// probe stuck for seconds neither delays the receiver's `closing` nor
+    /// acts on a session that has ended.
+    #[tokio::test]
+    async fn a_slow_drift_probe_does_not_stall_the_session() {
+        let (hello, name) = test_hello("sp");
+        let shared = Shared::default();
+        *shared.drift.lock().unwrap() = Some("slow compositor".into());
+        *shared.drift_delay.lock().unwrap() = Duration::from_millis(1500);
+        let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut backend = FakeBackend(shared.clone());
+        let task = tokio::spawn(async move {
+            let mut budget = LossBudget::default();
+            session(
+                sender_io,
+                &mut backend,
+                &opts(),
+                Instant::now(),
+                shutdown_rx,
+                &mut budget,
+                None,
+            )
+            .await
+        });
+        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello));
+        let rx_now = || Now::new(Duration::from_secs(1), 1e6);
+        for a in rx.handle(rx_now(), ReceiverEvent::Connected) {
+            if let ReceiverAction::Send(b) = a {
+                receiver_io.write_all(&b).await.unwrap();
+            }
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(5), receiver_io.read(&mut buf))
+                .await
+                .expect("no streamConfig")
+                .unwrap();
+            let acts = rx.handle(rx_now(), ReceiverEvent::Bytes(&buf[..n]));
+            if acts
+                .iter()
+                .any(|a| matches!(a, ReceiverAction::StreamConfig(_)))
+            {
+                break;
+            }
+        }
+        // A few ticks: the probe is now blocking on its thread.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(shared.drift.lock().unwrap().is_none(), "probe not started");
+        if let ReceiverAction::Send(b) =
+            rx.control(&opendisplay_proto::control::ControlMessage::Closing)
+        {
+            receiver_io.write_all(&b).await.unwrap();
+        }
+        let began = Instant::now();
+        let end = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            began.elapsed() < Duration::from_millis(800),
+            "took {:?}",
+            began.elapsed()
+        );
+        forget_lock(&name);
+        assert_eq!(end, SessionEnd::ReceiverClosed);
+        assert!(
+            !shared.entries().iter().any(|l| l == "reconfigure"),
+            "{:?}",
+            shared.entries()
+        );
+    }
+
     #[tokio::test]
     async fn a_drifted_display_is_restored_from_its_spec() {
         let (hello, name) = test_hello("dr");
@@ -1813,6 +2165,33 @@ mod tests {
         forget_lock(&name);
         assert_eq!(*shared.painted.lock().unwrap(), Some(true));
         assert!(!shared.entries().iter().any(|l| l == "start_cursor"));
+    }
+
+    #[test]
+    fn the_success_line_reads_plainly() {
+        let info = DisplayInfo {
+            name: "od-1f046d".into(),
+            width: 4096,
+            height: 2304,
+            refresh_hz: 60.0,
+            scale: 2.0,
+            x: 0,
+            y: 0,
+        };
+        assert_eq!(
+            extending_line("iMac (1F04…)", &info, Position::AutoLeft),
+            "Extending onto iMac (1F04…): 2048x1152 logical at 2x (od-1f046d, left of your other displays). Ctrl+C to stop."
+        );
+        let frac = DisplayInfo {
+            scale: 2.6666667,
+            width: 2424,
+            height: 1080,
+            ..info
+        };
+        assert!(
+            extending_line("Pixel", &frac, Position::At(10, 20))
+                .contains("909x405 logical at 2.67x (od-1f046d, at 10,20)")
+        );
     }
 
     #[test]

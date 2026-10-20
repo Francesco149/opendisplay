@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use super::ipc::SwayIpc;
 use super::outman::{self, Target};
 use super::record::{self, Record};
-use crate::backend::{DisplayInfo, DisplaySpec, LayoutRect, place};
+use crate::backend::{DisplayInfo, DisplaySpec, DriftProbe, LayoutRect, place};
 use crate::wayland::display::OutputControl;
 
 pub struct WlrootsOutput {
@@ -133,27 +133,25 @@ impl OutputControl for WlrootsOutput {
         Ok(())
     }
 
-    fn drifted(&mut self) -> Option<String> {
+    fn drift_probe(&mut self) -> Option<DriftProbe> {
         if self.info.width == 0 || self.last_check.elapsed() < DRIFT_CHECK {
             return None;
         }
         self.last_check = Instant::now();
-        let o = self.ipc.output(&self.info.name).ok().flatten()?;
-        let mode = o.current_mode.unwrap_or_default();
-        let scale = o.scale.unwrap_or(self.info.scale);
-        let changed = (mode.width, mode.height) != (self.info.width, self.info.height)
-            || (scale - self.info.scale).abs() > 1e-3;
-        changed.then(|| {
-            format!(
-                "{} is {}x{} scale {scale}, set {}x{} scale {}",
-                self.info.name,
-                mode.width,
-                mode.height,
-                self.info.width,
-                self.info.height,
-                self.info.scale
-            )
-        })
+        let (ipc, info) = (self.ipc.clone(), self.info.clone());
+        Some(Box::new(move || {
+            let o = ipc.output(&info.name).ok().flatten()?;
+            let mode = o.current_mode.unwrap_or_default();
+            let scale = o.scale.unwrap_or(info.scale);
+            let changed = (mode.width, mode.height) != (info.width, info.height)
+                || (scale - info.scale).abs() > 1e-3;
+            changed.then(|| {
+                format!(
+                    "{} is {}x{} scale {scale}, set {}x{} scale {}",
+                    info.name, mode.width, mode.height, info.width, info.height, info.scale
+                )
+            })
+        }))
     }
 
     fn remove(&mut self) -> Result<()> {

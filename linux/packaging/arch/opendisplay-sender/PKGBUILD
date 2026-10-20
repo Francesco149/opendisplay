@@ -11,7 +11,12 @@
 # file, so the AUR repository only needs PKGBUILD and .SRCINFO.
 
 pkgname=opendisplay-sender
-pkgver=0.1.0_beta.1
+# Pre-releases map to pacman's own ordering, which sorts a letter run below
+# the plain release: tag 0.1.0-beta.1 -> pkgver 0.1.0beta1, and
+# `vercmp 0.1.0beta1 0.1.0` = -1, so the final 0.1.0 replaces the beta.
+# (`0.1.0_beta.1` would sort *above* 0.1.0.) bump.sh sets both lines.
+pkgver=0.1.0beta1
+_tag=linux-v0.1.0-beta.1
 pkgrel=1
 pkgdesc="OpenDisplay sender for Wayland: extend a Linux desktop onto an iPhone, iPad, Android device or Mac"
 arch=('x86_64' 'aarch64')
@@ -25,11 +30,10 @@ depends=(
 )
 makedepends=('cargo' 'pkgconf' 'clang')  # clang: bindgen for ffmpeg-sys-next
 makedepends_x86_64=('nasm')              # OpenH264's x86 assembly (fallback encoder)
-provides=('od-sender')
+# No provides=(): it names packages, and nothing depends on one called
+# od-sender (the binary's name).
 options=('!lto')  # cargo profile handles LTO
 
-# Tags carry a dash (linux-v0.1.0-beta.1), pkgver cannot; `_` maps back.
-_tag="linux-v${pkgver//_/-}"
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/peetzweg/opendisplay/archive/refs/tags/${_tag}.tar.gz")
 sha256sums=('SKIP')
 
@@ -43,6 +47,7 @@ build() {
   cd "opendisplay-${_tag}/linux"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  export OD_SENDER_VERSION="${_tag#linux-v}"  # no .git in the tarball
   cargo build --frozen --release -p od-sender
 }
 
@@ -50,6 +55,7 @@ check() {
   cd "opendisplay-${_tag}/linux"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  export OD_SENDER_VERSION="${_tag#linux-v}"  # no .git in the tarball
   # Unit tests only: nothing here needs a compositor or the network.
   cargo test --frozen --release -p od-sender
 }

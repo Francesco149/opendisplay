@@ -1,4 +1,5 @@
 mod backend;
+mod bounded;
 mod config;
 mod desktop;
 mod dev;
@@ -24,7 +25,7 @@ use backend::{BackendId, Position};
 /// OpenDisplay sender for Linux: extends a Wayland desktop onto an
 /// OpenDisplay receiver.
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version = env!("OD_SENDER_VERSION"), about)]
 struct Args {
     /// Target one of several running Hyprland instances, like `hyprctl -i`
     /// (index from `od-sender doctor`, or the full signature). Sets
@@ -72,12 +73,16 @@ impl BackendArgs {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Extend the desktop onto a receiver: dial it (or discover it), create a
-    /// virtual output sized from its `hello`, capture, encode and stream.
+    /// virtual display sized from its `hello`, capture, encode and stream.
     Run {
-        /// Receiver: `host:port`, or a name/id to discover; omit for the
-        /// first receiver found.
+        /// Receiver: `host:port`, or a name/id to discover. Omitted: the only
+        /// receiver on the network (several: pick one with --to).
         #[arg(long, value_name = "NAME|ID|ADDR")]
         to: Option<String>,
+        /// Keep looking until the receiver appears instead of giving up after
+        /// 10 s (for the systemd unit and login autostart).
+        #[arg(long)]
+        wait: bool,
         /// Receiver address (same as `--to host:port`).
         #[arg(long, hide = true, conflicts_with = "to")]
         connect: Option<SocketAddr>,
@@ -87,8 +92,8 @@ enum Cmd {
         /// Target bitrate [default: 20, or the config file's].
         #[arg(long)]
         bitrate_mbps: Option<f32>,
-        /// Frame-rate cap; default: the receiver's `displayMaxFrameRate`
-        /// (120 on ProMotion), never above it.
+        /// Frame-rate cap; default: 60, or up to the receiver's panel rate
+        /// when its decoder advertises more (never above either).
         #[arg(long)]
         max_fps: Option<f32>,
         /// Output scale: `passthrough` (the receiver's own scale), `mac`
@@ -110,16 +115,16 @@ enum Cmd {
         /// Same as `--cursor off`.
         #[arg(long, conflicts_with = "cursor")]
         no_cursor: bool,
-        /// Position of the virtual output: auto-right, auto-left, auto-up,
+        /// Position of the virtual display: auto-right, auto-left, auto-up,
         /// auto-down, or "x,y" [default: auto-right, or the config file's].
         #[arg(long)]
         position: Option<Position>,
-        /// Show this workspace (name or number) on the virtual output, without
+        /// Show this workspace (name or number) on the virtual display, without
         /// taking focus from your current monitor. Hyprland and Sway [default:
         /// the next free one, or the config file's].
         #[arg(long, value_name = "NAME|ID")]
         workspace: Option<String>,
-        /// Leave the virtual output in place when the sender exits (development).
+        /// Leave the virtual display in place when the sender exits (development).
         #[arg(long)]
         keep_output: bool,
         #[arg(long)]
@@ -142,12 +147,13 @@ enum Cmd {
         #[command(flatten)]
         backend: BackendArgs,
     },
-    /// Remove virtual outputs left behind by senders that are no longer running.
+    /// Remove virtual displays left behind by senders that are no longer running.
     Clean {
         #[command(flatten)]
         backend: BackendArgs,
     },
     /// Developer self-tests.
+    #[command(hide = true)]
     Dev {
         #[command(subcommand)]
         cmd: dev::Dev,
@@ -162,10 +168,16 @@ struct Receiver {
 }
 
 /// Resolve `--to` (or the legacy `--connect`/`--name`) to an address.
+/// `run` found no receiver (exit codes are documented in linux/README.md).
+const EXIT_NO_RECEIVER: i32 = 3;
+/// `run` without `--to` found several receivers.
+const EXIT_SEVERAL_RECEIVERS: i32 = 4;
+
 fn resolve_receiver(
     to: Option<String>,
     connect: Option<SocketAddr>,
     name: Option<String>,
+    wait: bool,
 ) -> Result<Receiver> {
     let direct = |addr: SocketAddr| Receiver {
         addr,
@@ -179,7 +191,20 @@ fn resolve_receiver(
     if let Some(a) = to.as_deref().and_then(|t| t.parse::<SocketAddr>().ok()) {
         return Ok(direct(a));
     }
-    let found = discover::find(to.as_deref(), Duration::from_secs(10))?;
+    if wait {
+        match &to {
+            Some(t) => info!("waiting for receiver {t:?} to appear (Ctrl+C to stop)"),
+            None => info!("waiting for a receiver to appear (Ctrl+C to stop)"),
+        }
+    }
+    let timeout = (!wait).then_some(Duration::from_secs(10));
+    let found = discover::find(to.as_deref(), timeout)?;
+    if to.is_none() {
+        info!(
+            "using {} ({}), the only receiver found; choose one with --to <name>",
+            found.instance, found.addr
+        );
+    }
     info!(
         "discovered {} at {} (pv {}, id {:?})",
         found.instance, found.addr, found.pv, found.id
@@ -215,6 +240,10 @@ fn main() {
             error!("{e:#}");
             if e.downcast_ref::<detect::Unsupported>().is_some() {
                 detect::EXIT_UNSUPPORTED
+            } else if e.downcast_ref::<discover::NoReceiver>().is_some() {
+                EXIT_NO_RECEIVER
+            } else if e.downcast_ref::<discover::SeveralReceivers>().is_some() {
+                EXIT_SEVERAL_RECEIVERS
             } else {
                 1
             }
@@ -236,6 +265,7 @@ fn real_main() -> Result<i32> {
     match args.cmd {
         Cmd::Run {
             to,
+            wait,
             connect,
             name,
             bitrate_mbps,
@@ -267,8 +297,8 @@ fn real_main() -> Result<i32> {
             });
             let mut backend = detect::detect(&backend.request_with(config.capture))?;
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
-                let receiver = resolve_receiver(to, connect, name)?;
+            let ran = rt.block_on(async {
+                let receiver = resolve_receiver(to, connect, name, wait)?;
                 session::run(
                     receiver.addr,
                     backend.as_mut(),
@@ -297,12 +327,16 @@ fn real_main() -> Result<i32> {
                     },
                 )
                 .await
-            })?;
+            });
+            // A drift probe may still be waiting on compositor IPC; the
+            // display is already gone, so do not wait long for it.
+            rt.shutdown_timeout(Duration::from_millis(500));
+            ran?;
         }
         Cmd::List { timeout } => {
             let found = discover::list(Duration::from_secs_f64(timeout))?;
             if found.is_empty() {
-                println!("no receivers found");
+                println!("no receivers found.\n{}", discover::NO_RECEIVER_HINT);
                 return Ok(1);
             }
             let w = found

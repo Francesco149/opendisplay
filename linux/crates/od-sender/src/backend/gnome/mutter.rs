@@ -9,13 +9,12 @@
 //! consumer negotiates, so the capture asks for the same size.
 
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use tracing::debug;
-use zbus::blocking::{Connection, MessageIterator};
+use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Type, Value};
 
 const SC: &str = "org.gnome.Mutter.ScreenCast";
@@ -159,6 +158,49 @@ pub fn probe(conn: &Connection) -> Result<(i32, i32)> {
     Ok((sc, rd))
 }
 
+/// How long Mutter gets to announce the PipeWire stream after `Start`.
+const NODE_WITHIN: Duration = Duration::from_secs(5);
+
+/// Start the RemoteDesktop session `rd` and wait, at most `within`, for the
+/// `PipeWireStreamAdded` signal `rule` matches; its node id. The match is
+/// removed again when this returns, whatever the outcome.
+async fn start_and_wait_for_node(
+    conn: &zbus::Connection,
+    rule: zbus::MatchRule<'_>,
+    rd: &str,
+    within: Duration,
+) -> Result<u32> {
+    use futures_lite::StreamExt;
+    let mut signals = zbus::MessageStream::for_match_rule(rule, conn, Some(4)).await?;
+    conn.call_method(
+        Some(RD),
+        rd,
+        Some("org.gnome.Mutter.RemoteDesktop.Session"),
+        "Start",
+        &(),
+    )
+    .await
+    .context("RemoteDesktop.Session.Start")?;
+    let added = async {
+        while let Some(msg) = signals.next().await {
+            if let Ok(node) = msg.and_then(|m| m.body().deserialize::<u32>()) {
+                return Ok(node);
+            }
+        }
+        Err(anyhow!(
+            "the session bus closed before Mutter announced the stream"
+        ))
+    };
+    let timeout = async {
+        async_io::Timer::after(within).await;
+        Err(anyhow!(
+            "Mutter announced no PipeWire stream within {}s",
+            within.as_secs()
+        ))
+    };
+    futures_lite::future::or(added, timeout).await
+}
+
 /// One virtual monitor: a RemoteDesktop session (for input) with a linked
 /// ScreenCast session recording a virtual monitor. Stopping the
 /// RemoteDesktop session, or dropping the connection, removes the monitor.
@@ -189,10 +231,31 @@ impl VirtualMonitor {
             .call_method(Some(RD), RD_PATH, Some(RD), "CreateSession", &())
             .context("RemoteDesktop.CreateSession")?;
         let rd: OwnedObjectPath = reply.body().deserialize()?;
+        // The session exists from here on: build `Self` now so every early
+        // return below stops it (Drop), instead of leaving a virtual monitor
+        // on the desktop per failed attempt. `stream`, `node` and
+        // `placement` are filled in as they become known.
+        let mut vm = Self {
+            conn,
+            stream: rd.clone(),
+            rd,
+            node: 0,
+            placement: Placement {
+                connector: String::new(),
+                width: req.width,
+                height: req.height,
+                refresh: req.hz as f64,
+                x: 0,
+                y: 0,
+                scale: 1.0,
+            },
+            stopped: false,
+        };
+        let conn = vm.conn.clone();
         let rd_id: String = get_property(
             &conn,
             RD,
-            rd.as_str(),
+            vm.rd.as_str(),
             "org.gnome.Mutter.RemoteDesktop.Session",
             "SessionId",
         )?;
@@ -224,7 +287,7 @@ impl VirtualMonitor {
                 &(props,),
             )
             .context("ScreenCast.Session.RecordVirtual")?;
-        let stream: OwnedObjectPath = reply.body().deserialize()?;
+        vm.stream = reply.body().deserialize()?;
 
         // PipeWireStreamAdded arrives after Start; listen before starting.
         let rule = zbus::MatchRule::builder()
@@ -232,32 +295,14 @@ impl VirtualMonitor {
             .sender(SC)?
             .interface("org.gnome.Mutter.ScreenCast.Stream")?
             .member("PipeWireStreamAdded")?
-            .path(stream.as_str())?
+            .path(vm.stream.as_str())?
             .build();
-        let signals = MessageIterator::for_match_rule(rule, &conn, Some(4))?;
-        let (node_tx, node_rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("mutter-signal".into())
-            .spawn(move || {
-                for msg in signals {
-                    if let Ok(node) = msg.and_then(|m| m.body().deserialize::<u32>()) {
-                        let _ = node_tx.send(node);
-                        return;
-                    }
-                }
-            })?;
-
-        conn.call_method(
-            Some(RD),
-            rd.as_str(),
-            Some("org.gnome.Mutter.RemoteDesktop.Session"),
-            "Start",
-            &(),
-        )
-        .context("RemoteDesktop.Session.Start")?;
-        let node = node_rx
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| anyhow!("Mutter announced no PipeWire stream within 5 s"))?;
+        vm.node = async_io::block_on(start_and_wait_for_node(
+            conn.inner(),
+            rule,
+            vm.rd.as_str(),
+            NODE_WITHIN,
+        ))?;
 
         // The new connector is ours; Mutter names virtual ones Meta-<n>.
         let mut placement = None;
@@ -273,22 +318,6 @@ impl VirtualMonitor {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let mut vm = Self {
-            conn,
-            rd,
-            stream,
-            node,
-            placement: Placement {
-                connector: String::new(),
-                width: req.width,
-                height: req.height,
-                refresh: req.hz as f64,
-                x: 0,
-                y: 0,
-                scale: 1.0,
-            },
-            stopped: false,
-        };
         match placement {
             Some(p) => vm.placement = p,
             None => bail!("Mutter added no monitor for the stream"),

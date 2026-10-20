@@ -9,9 +9,9 @@ pub mod registry;
 pub mod screencopy;
 pub mod shm_pool;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use wayland_client::Connection;
 
 /// `blocking_dispatch` with an upper bound, so a capture of a static output
@@ -47,6 +47,26 @@ pub fn dispatch_with_timeout<S>(
     Ok(())
 }
 
+/// Dispatch until `done` holds, failing at `deadline` instead of waiting on
+/// a stalled compositor forever. `what` names the awaited event in the error.
+pub fn dispatch_until<S>(
+    conn: &Connection,
+    queue: &mut wayland_client::EventQueue<S>,
+    st: &mut S,
+    deadline: Instant,
+    what: &str,
+    done: impl Fn(&S) -> bool,
+) -> Result<()> {
+    while !done(st) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("the compositor did not send {what} in time");
+        }
+        dispatch_with_timeout(conn, queue, st, left.min(Duration::from_millis(100)))?;
+    }
+    Ok(())
+}
+
 #[repr(C)]
 struct PollFd {
     fd: i32,
@@ -65,4 +85,35 @@ fn libc_pollfd(fd: i32) -> PollFd {
 unsafe extern "C" {
     #[link_name = "poll"]
     fn libc_poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+
+    use super::*;
+
+    #[test]
+    fn dispatch_until_gives_up_on_a_silent_compositor() {
+        // A peer that accepts the connection and never says anything.
+        let (ours, _silent) = UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(ours).unwrap();
+        let mut queue = conn.new_event_queue::<()>();
+        let began = Instant::now();
+        let err = dispatch_until(
+            &conn,
+            &mut queue,
+            &mut (),
+            Instant::now() + Duration::from_millis(200),
+            "anything",
+            |_| false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("anything"), "{err:#}");
+        let took = began.elapsed();
+        assert!(
+            took >= Duration::from_millis(200) && took < Duration::from_secs(2),
+            "{took:?}"
+        );
+    }
 }

@@ -269,10 +269,12 @@ pub trait VirtualDisplay: Send {
     }
     /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
-    /// `Some(why)` when the compositor changed the display away from its
-    /// spec (Hyprland: a config reload); the session then rebuilds it from
-    /// the same spec. Called on every session tick: must be cheap.
-    fn drifted(&mut self) -> Option<String> {
+    /// A check of whether the compositor changed the display away from its
+    /// spec (Hyprland: a config reload); `Some(why)` from the probe makes
+    /// the session rebuild it from the same spec. Called on every session
+    /// tick and must not block: compositor IPC goes in the probe, which the
+    /// session runs on a blocking thread.
+    fn drift_probe(&mut self) -> Option<DriftProbe> {
         None
     }
     /// Resize in place; stops capture first.
@@ -389,6 +391,9 @@ pub enum CursorEvent {
 }
 
 pub type CursorSink = Box<dyn FnMut(CursorEvent) + Send>;
+
+/// A drift check that may block on the compositor; `Some(why)` if drifted.
+pub type DriftProbe = Box<dyn FnOnce() -> Option<String> + Send>;
 
 pub trait InputSink: Send {
     fn touch(&mut self, t: &Touch);

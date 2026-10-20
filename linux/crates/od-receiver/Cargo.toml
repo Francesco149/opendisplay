@@ -8,10 +8,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["gstreamer"]
+default = ["gstreamer", "gtk", "logind"]
 # Decode and present through GStreamer. Without it only `--sink none` works,
 # which is enough for protocol testing on a machine without the dev packages.
 gstreamer = ["dep:gstreamer", "dep:gstreamer-app"]
+# The GTK 4 window presenter (fullscreen, input, cursor overlay).
+gtk = ["gstreamer", "dep:gtk4", "dep:gst-plugin-gtk4"]
+# Tell the sender `sleeping` before a suspend (logind PrepareForSleep).
+logind = ["dep:zbus"]
 
 [dependencies]
 opendisplay-proto = { workspace = true }
@@ -27,6 +31,9 @@ mdns-sd = { workspace = true }
 wayland-client = { workspace = true }
 gstreamer = { workspace = true, optional = true }
 gstreamer-app = { workspace = true, optional = true }
+gtk4 = { workspace = true, optional = true }
+gst-plugin-gtk4 = { workspace = true, optional = true }
+zbus = { workspace = true, optional = true }
 
 [dev-dependencies]
 od-fake-sender = { path = "../od-fake-sender" }

@@ -3,8 +3,12 @@
 //! (§6.3), a Bonjour advertisement (§2.1), and a decode/present pipeline.
 
 pub mod discovery;
+#[cfg(feature = "gtk")]
+pub mod gtk_ui;
 pub mod id;
+pub mod input;
 pub mod outputs;
+pub mod power;
 pub mod stats;
 pub mod video;
 
@@ -24,6 +28,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use input::UserInput;
+use opendisplay_proto::control::{Scroll, Touch};
 use video::VideoOutput;
 
 #[derive(Debug, Clone)]
@@ -47,6 +53,10 @@ pub struct Report {
     pub decode_errors: u32,
     pub cursor_updates: u64,
     pub closes: u32,
+    /// Touch/scroll messages sent from local input.
+    pub input_events: u64,
+    /// Sleep notifications handled.
+    pub sleeps: u32,
     /// Frames that reached the sink (None when the backend cannot tell).
     pub rendered_frames: Option<u64>,
 }
@@ -56,6 +66,10 @@ pub struct Receiver {
     listener: TcpListener,
     udp: Option<UdpSocket>,
     video: Box<dyn VideoOutput>,
+    /// Pointer input from the window, sent to the sender as touch/scroll.
+    input: Option<tokio::sync::mpsc::UnboundedReceiver<UserInput>>,
+    /// Sleep notifications (logind in the binary, a fake in tests).
+    power: Option<tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>>,
 }
 
 fn now(start: Instant) -> Now {
@@ -96,7 +110,24 @@ impl Receiver {
             listener,
             udp,
             video,
+            input: None,
+            power: None,
         })
+    }
+
+    /// Say `sleeping` and drop the sender when the machine goes to sleep.
+    pub fn with_power(
+        mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>,
+    ) -> Self {
+        self.power = Some(rx);
+        self
+    }
+
+    /// Forward local pointer input to the connected sender.
+    pub fn with_input(mut self, rx: tokio::sync::mpsc::UnboundedReceiver<UserInput>) -> Self {
+        self.input = Some(rx);
+        self
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -163,6 +194,44 @@ impl Receiver {
                         Ok(n) => sess.handle(now(start), ReceiverEvent::Bytes(&buf[..n])),
                     }
                 }
+                Some(power::PowerEvent::Sleeping { done }) = recv_power(&mut self.power) => {
+                    report.sleeps += 1;
+                    if let Some(s) = current.as_mut() {
+                        info!("going to sleep: telling the sender");
+                        // §6.1: best effort, right before closing; the sender
+                        // keeps listening for the wake and redials.
+                        if let ReceiverAction::Send(bytes) = sess.control(&ControlMessage::Sleeping) {
+                            let _ = s.write_all(&bytes).await;
+                            let _ = s.flush().await;
+                        }
+                        current = None;
+                        peer = None;
+                        sess.handle(now(start), ReceiverEvent::Disconnected);
+                    }
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                    continue;
+                }
+                Some(ev) = recv_input(&mut self.input) => {
+                    if !sess.is_connected() {
+                        debug!("input while no sender is connected: {ev:?}");
+                        continue;
+                    }
+                    report.input_events += 1;
+                    let msg = match ev {
+                        UserInput::Touch { phase, x, y, local_ms } => ControlMessage::Touch(Touch {
+                            phase,
+                            x,
+                            y,
+                            // §6.1: in the sender's clock, omitted until the offset is known.
+                            t: sess.clock().to_sender(local_ms),
+                        }),
+                        UserInput::Scroll { dx, dy } => ControlMessage::Scroll(Scroll { dx, dy }),
+                    };
+                    debug!("input {msg:?}");
+                    vec![sess.control(&msg)]
+                }
                 dgram = recv_udp(&self.udp, &mut udp_buf) => {
                     let (n, from) = dgram.context("udp recv")?;
                     let mut h = DefaultHasher::new();
@@ -187,9 +256,15 @@ impl Receiver {
                     extra.insert("stalls".into(), sess.counters.dropped_awaiting_idr.into());
                     extra.insert("decoder".into(), self.video.describe().into());
                     if let Some(r) = self.video.rendered() {
+                        // The running total too: decoded-but-never-shown
+                        // shows up as a total stuck at 0.
+                        extra.insert("rendered".into(), r.into());
                         let delta = r - last_rendered;
                         last_rendered = r;
                         extra.insert("renderFps".into(), ((delta as f64 / self.cfg.stats_every.as_secs_f64() * 10.0).round() / 10.0).into());
+                    }
+                    for ms in self.video.take_decode_ms() {
+                        window.decoded(ms);
                     }
                     let stats = window.flush(extra);
                     info!("stats {stats}");
@@ -236,8 +311,11 @@ impl Receiver {
                             pending_decode_lost = true;
                         }
                     }
-                    ReceiverAction::Cursor { .. } => report.cursor_updates += 1, // v1 renders no cursor (§6.2 MAY)
-                    ReceiverAction::CursorImage(_) => {}
+                    ReceiverAction::Cursor { x, y, visible } => {
+                        report.cursor_updates += 1;
+                        self.video.cursor(x, y, visible);
+                    }
+                    ReceiverAction::CursorImage(img) => self.video.cursor_image(&img),
                     ReceiverAction::Welcome(w) => {
                         report.welcomes += 1;
                         info!("welcome: sender pv {} min {}", w.pv, w.min);
@@ -294,6 +372,24 @@ impl Receiver {
 async fn read_current(current: &mut Option<TcpStream>, buf: &mut [u8]) -> std::io::Result<usize> {
     match current {
         Some(s) => s.read(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_power(
+    power: &mut Option<tokio::sync::mpsc::UnboundedReceiver<power::PowerEvent>>,
+) -> Option<power::PowerEvent> {
+    match power {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_input(
+    input: &mut Option<tokio::sync::mpsc::UnboundedReceiver<UserInput>>,
+) -> Option<UserInput> {
+    match input {
+        Some(rx) => rx.recv().await,
         None => std::future::pending().await,
     }
 }
