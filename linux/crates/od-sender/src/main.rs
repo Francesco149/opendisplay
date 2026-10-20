@@ -1,4 +1,5 @@
 mod capture;
+mod desktop;
 mod discover;
 mod encoder;
 mod hyprland;
