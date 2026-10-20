@@ -4,8 +4,13 @@
 
 pub mod adopt;
 pub mod detect;
+#[cfg(feature = "gnome")]
+pub mod gnome;
 pub mod hyprland;
+#[cfg(feature = "kde")]
+pub mod kde;
 pub mod lock;
+pub mod wlroots;
 
 use std::fmt;
 use std::str::FromStr;
@@ -22,11 +27,15 @@ pub enum BackendId {
     /// An output that already exists (`--output <name>`): capture and input
     /// only, nothing is created or removed.
     Adopt,
-    /// Sway and other wlroots compositors (not implemented yet).
+    /// Sway >= 1.10: headless outputs over Sway IPC, sized through
+    /// zwlr_output_manager_v1.
     Wlroots,
-    /// KDE Plasma (not implemented yet).
+    /// KDE Plasma (KWin): zkde_screencast virtual outputs over PipeWire,
+    /// fake-input pointer.
     Kde,
     /// xdg-desktop-portal ScreenCast/RemoteDesktop, e.g. GNOME (not implemented yet).
+    /// GNOME: virtual monitor and input over Mutter's D-Bus APIs.
+    Gnome,
     Portal,
 }
 
@@ -37,6 +46,7 @@ impl fmt::Display for BackendId {
             BackendId::Adopt => "adopt",
             BackendId::Wlroots => "wlroots",
             BackendId::Kde => "kde",
+            BackendId::Gnome => "gnome",
             BackendId::Portal => "portal",
         })
     }
@@ -152,6 +162,10 @@ pub trait Backend: Send {
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>>;
     /// Remove `od-*` outputs that no running sender holds a lock on.
     fn clean(&mut self) -> Result<Vec<String>>;
+    /// Whether the cursor should be visible at all (`--cursor off`: no), for
+    /// backends that fix it when the output is created rather than per
+    /// capture. Called before the first [`open`](Self::open).
+    fn set_cursor_visible(&mut self, _visible: bool) {}
     /// The output lock [`open`](Self::open) takes for `spec`.
     fn lock_name(&self, spec: &DisplaySpec) -> String {
         spec.name.clone()
@@ -175,7 +189,22 @@ pub trait VirtualDisplay: Send {
     /// output was removed, the compositor stopped the session) the sink gets
     /// one [`CaptureEvent::Ended`] as its last event.
     fn start_capture(&mut self, opts: CaptureOptions, sink: FrameSink) -> Result<()>;
-    /// Stop capture and join its thread. Idempotent.
+    /// Deliver the pointer cursor on its own (position and sprite, for the
+    /// cursor side channel, PROTOCOL §6.3) instead of painting it into the
+    /// frames. Call before [`start_capture`](Self::start_capture) with
+    /// `cursor: false`; [`stop_capture`](Self::stop_capture) stops it too.
+    /// Errs when the compositor cannot; then paint the cursor instead.
+    fn start_cursor(&mut self, _sink: CursorSink) -> Result<()> {
+        bail!("this display cannot deliver the cursor separately")
+    }
+    /// Switch the frames between with and without a painted cursor, without
+    /// touching the output (a new capture session on the same output).
+    /// Used to stop painting once the side channel delivers the cursor, and
+    /// to paint again if it fails.
+    fn set_cursor_painted(&mut self, _painted: bool) -> Result<()> {
+        bail!("this display cannot switch cursor painting")
+    }
+    /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
     /// Resize in place; stops capture first.
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
@@ -204,15 +233,47 @@ pub struct Frame {
     pub buf: FrameBuf,
 }
 
+/// The bytes of a CPU frame: owned, or leased from the capture's buffer
+/// pool (no copy; the buffer goes back to the pool when this is dropped).
+pub enum Pixels {
+    Owned(Vec<u8>),
+    Leased(Box<dyn PixelLease>),
+}
+
+/// A capture buffer lent out for one frame.
+pub trait PixelLease: Send {
+    fn bytes(&self) -> &[u8];
+}
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Pixels::Owned(v) => v,
+            Pixels::Leased(l) => l.bytes(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for Pixels {
+    fn from(v: Vec<u8>) -> Self {
+        Pixels::Owned(v)
+    }
+}
+
 pub enum FrameBuf {
     Cpu {
-        pixels: Vec<u8>,
+        pixels: Pixels,
         width: u32,
         height: u32,
         stride: u32,
         #[allow(dead_code)] // the encoders assume BGRX/BGRA, which is what capture prefers
         format: PixelFormat,
     },
+    /// Already converted to the encoder's 4:2:0 format by the convert stage
+    /// ([`crate::encoder::ConvertStage`]).
+    Yuv(crate::encoder::YuvFrame),
     /// GPU buffer for zero-copy hardware encode; not produced yet (VA-API).
     #[allow(dead_code)]
     Dmabuf { width: u32, height: u32 },
@@ -224,6 +285,7 @@ impl Frame {
             FrameBuf::Cpu { width, height, .. } | FrameBuf::Dmabuf { width, height } => {
                 (width, height)
             }
+            FrameBuf::Yuv(ref y) => y.dimensions(),
         }
     }
 }
@@ -235,6 +297,29 @@ pub enum CaptureEvent {
 }
 
 pub type FrameSink = Box<dyn FnMut(CaptureEvent) + Send>;
+
+/// The pointer cursor over a display, for the cursor side channel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CursorEvent {
+    /// Hotspot position, normalized to the display (PROTOCOL §7).
+    Moved { x: f64, y: f64 },
+    /// The cursor left the display (or has no image).
+    Hidden,
+    /// No sprite can be delivered (unsupported format, captures failing):
+    /// the side channel must not be used, paint the cursor instead.
+    SpriteUnavailable(String),
+    /// A new sprite: PNG bytes, its size normalized to the display, the
+    /// hotspot normalized within the sprite.
+    Image {
+        png: Vec<u8>,
+        nw: f64,
+        nh: f64,
+        ax: f64,
+        ay: f64,
+    },
+}
+
+pub type CursorSink = Box<dyn FnMut(CursorEvent) + Send>;
 
 pub trait InputSink: Send {
     fn touch(&mut self, t: &Touch);

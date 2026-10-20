@@ -10,6 +10,7 @@ pkgbase = opendisplay-sender
 	makedepends = pkgconf
 	makedepends = clang
 	depends = ffmpeg
+	depends = libpipewire
 	depends = gcc-libs
 	depends = glibc
 	provides = od-sender

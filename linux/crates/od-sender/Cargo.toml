@@ -7,6 +7,17 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["kde", "gnome"]
+# PipeWire video capture (src/pipewire.rs), shared by the KDE and GNOME
+# backends; links libpipewire-0.3.
+pipewire = ["dep:pipewire"]
+# KDE Plasma backend: zkde_screencast virtual outputs, fake input.
+kde = ["pipewire"]
+# GNOME (Mutter): virtual monitor and input over Mutter's ScreenCast and
+# RemoteDesktop D-Bus APIs, frames over PipeWire.
+gnome = ["pipewire", "dep:zbus"]
+
 [dependencies]
 opendisplay-proto = { workspace = true }
 opendisplay-session = { workspace = true }
@@ -18,10 +29,15 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+miniz_oxide = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
 wayland-protocols-wlr = { workspace = true }
+wayland-scanner = { workspace = true }
+wayland-backend = { workspace = true }
+pipewire = { workspace = true, optional = true }
 openh264 = { workspace = true }
 ffmpeg-next = { workspace = true }
 mdns-sd = { workspace = true }
 uuid = { workspace = true }
+zbus = { workspace = true, optional = true }

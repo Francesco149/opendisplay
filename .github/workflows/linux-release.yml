@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libclang-dev nasm
+            pkg-config libclang-dev nasm libpipewire-0.3-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -100,14 +100,15 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p od-sender
 
-      # Only glibc, libgcc and libstdc++ (OpenH264 is C++) may be NEEDED; an
+      # Only glibc, libgcc, libstdc++ (OpenH264 is C++) and libpipewire (KDE
+      # backend; its 0.3 soname has been stable since 2020) may be NEEDED; an
       # FFmpeg or x264 soname here means the static link silently fell back.
       - name: Check dynamic dependencies
         run: |
           bin=target/release/od-sender
           readelf -d "$bin" | grep NEEDED
           bad="$(readelf -d "$bin" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' |
-            grep -Ev '^(libc|libm|libpthread|libdl|librt)\.so\.[0-9]+$|^libgcc_s\.so\.1$|^libstdc\+\+\.so\.6$|^ld-linux-(x86-64|aarch64)\.so\.[0-9]+$' || true)"
+            grep -Ev '^(libc|libm|libpthread|libdl|librt)\.so\.[0-9]+$|^libgcc_s\.so\.1$|^libstdc\+\+\.so\.6$|^libpipewire-0\.3\.so\.0$|^ld-linux-(x86-64|aarch64)\.so\.[0-9]+$' || true)"
           if [ -n "$bad" ]; then
             echo "::error::unexpected shared libraries: $bad"
             exit 1
@@ -184,7 +185,7 @@ jobs:
 
           **Arch Linux / Omarchy:** \`yay -S opendisplay-sender\` (AUR; builds against your system FFmpeg and gets updates through your AUR helper).
 
-          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed. Unpack, put \`od-sender\` on your \`PATH\`, and run \`od-sender run\`. Each tarball also has a desktop entry, a \`systemd --user\` template unit, the license (GPL-3.0; this build includes GPL x264), and \`PROTOCOL.md\`.
+          **Any other distribution:** the tarballs below run on x86_64 and aarch64 Linux with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). FFmpeg ${ffmpeg_tag} and x264 are linked in statically with only the H.264 encoders the sender uses, so no FFmpeg install is needed; PipeWire (\`libpipewire-0.3\`, present on any current desktop) must be installed. Unpack, put \`od-sender\` on your \`PATH\`, and run \`od-sender run\`. Each tarball also has a desktop entry, a \`systemd --user\` template unit, the license (GPL-3.0; this build includes GPL x264), and \`PROTOCOL.md\`.
 
           Linked-in sources: FFmpeg [${ffmpeg_tag}](https://github.com/FFmpeg/FFmpeg/tree/${ffmpeg_tag}) and x264 [${x264_commit:0:7}](https://code.videolan.org/videolan/x264/-/tree/${x264_commit}), configured by [\`build-static.sh\`](https://github.com/${GH_REPO}/blob/${TAG}/${script}).
 

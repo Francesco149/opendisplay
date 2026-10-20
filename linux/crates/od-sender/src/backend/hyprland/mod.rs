@@ -68,6 +68,12 @@ impl Backend for HyprlandBackend {
 
     fn caps(&self) -> Caps {
         Caps {
+            // Off on Hyprland through at least 0.56.2 (and main as of
+            // 2026-10-20): CCursorshareSession::render only draws the cursor
+            // when the pointer has both a buffer and a surface, which never
+            // happens, so every sprite is blank; and a pending cursor frame
+            // crashes Hyprland once its output is removed (fixed upstream
+            // after 0.56.2 by 8010b4e5c). The cursor stays in the video.
             cursor_metadata: false,
             dmabuf: false,
             resize_in_place: true,

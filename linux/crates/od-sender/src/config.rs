@@ -11,7 +11,7 @@
 //! bitrate-mbps = 20
 //! max-fps = 60
 //! encoder = "auto"            # auto | v4l2m2m | x264 | openh264
-//! cursor = true
+//! cursor = "auto"            # auto | video | off; true = auto, false = off
 //!
 //! [receiver."3F2A9C1E-..."]   # id (from `od-sender list`) or Bonjour name
 //! position = "auto-left"
@@ -29,6 +29,7 @@ use serde::Deserialize;
 use crate::backend::Position;
 use crate::desktop::ScalePolicy;
 use crate::encoder;
+use crate::session::CursorMode;
 
 /// `scale` is a word (`passthrough`, `mac`) or a number.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -45,6 +46,26 @@ impl ScaleValue {
             ScaleValue::Word(w) => w.parse(),
         }
         .map_err(|e: String| anyhow!("scale: {e}"))
+    }
+}
+
+/// `cursor` is a bool (true = auto, false = off) or a mode name.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+enum CursorValue {
+    Bool(bool),
+    Word(String),
+}
+
+impl CursorValue {
+    fn mode(&self) -> Result<CursorMode> {
+        match self {
+            CursorValue::Bool(true) => Ok(CursorMode::Auto),
+            CursorValue::Bool(false) => Ok(CursorMode::Off),
+            CursorValue::Word(w) => {
+                CursorMode::from_str(w, true).map_err(|m| anyhow!("cursor: {m}"))
+            }
+        }
     }
 }
 
@@ -65,7 +86,7 @@ struct RawConfig {
     bitrate_mbps: Option<f32>,
     max_fps: Option<f32>,
     encoder: Option<String>,
-    cursor: Option<bool>,
+    cursor: Option<CursorValue>,
     #[serde(default)]
     receiver: BTreeMap<String, RawOverride>,
 }
@@ -95,7 +116,7 @@ pub struct Config {
     pub to: Option<String>,
     pub max_fps: Option<f32>,
     pub encoder: Option<encoder::Backend>,
-    pub cursor: Option<bool>,
+    pub cursor: Option<CursorMode>,
     /// The top-level per-receiver settings.
     pub defaults: Layer,
     /// `[receiver."<key>"]` tables, by id or Bonjour name.
@@ -138,7 +159,7 @@ impl Config {
                 .encoder
                 .map(|e| encoder::Backend::from_str(&e, true).map_err(|m| anyhow!("encoder: {m}")))
                 .transpose()?,
-            cursor: raw.cursor,
+            cursor: raw.cursor.map(|c| c.mode()).transpose()?,
             defaults: layer(raw.position, raw.scale, raw.bitrate_mbps)?,
             receivers,
         })
@@ -215,7 +236,13 @@ mod tests {
         assert_eq!(c.to.as_deref(), Some("iPhone"));
         assert_eq!(c.max_fps, Some(60.0));
         assert_eq!(c.encoder, Some(encoder::Backend::X264));
-        assert_eq!(c.cursor, Some(false));
+        assert_eq!(c.cursor, Some(CursorMode::Off));
+        let video = Config::parse("cursor = \"video\"").unwrap();
+        assert_eq!(video.cursor, Some(CursorMode::Video));
+        assert_eq!(
+            Config::parse("cursor = true").unwrap().cursor,
+            Some(CursorMode::Auto)
+        );
         assert_eq!(
             c.defaults,
             Layer {
@@ -255,6 +282,7 @@ mod tests {
             "scale = -1",
             "bitrate-mbps = 0",
             "encoder = \"nvenc\"",
+            "cursor = \"sometimes\"",
             "[receiver.x]\nmax-fps = 30", // not overridable per receiver
         ] {
             assert!(Config::parse(bad).is_err(), "{bad:?} must not parse");

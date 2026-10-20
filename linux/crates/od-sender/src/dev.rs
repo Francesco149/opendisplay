@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use opendisplay_proto::control::{Scroll, Touch, TouchPhase};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::backend::hyprland::ipc::HyprlandIpc;
-use crate::backend::{CaptureEvent, CaptureOptions, DisplaySpec, FrameBuf, Position, detect};
+use crate::backend::{
+    CaptureEvent, CaptureOptions, DisplaySpec, FrameBuf, Pixels, Position, detect,
+};
 use crate::encoder;
 use crate::wayland::{capture, input};
 
@@ -77,6 +79,48 @@ pub enum Dev {
         #[arg(long)]
         save: Option<std::path::PathBuf>,
     },
+    /// Follow the pointer cursor of an existing output through the
+    /// ext-image-copy-capture cursor session (the cursor side channel's
+    /// source) and log what would be sent: position, enter/leave, sprite.
+    /// Creates nothing. On Hyprland <= 0.56.2, do not remove or disable the
+    /// output while it runs: a pending cursor frame then crashes Hyprland.
+    CursorTest {
+        /// wl_output name, e.g. eDP-1 or an od-… output.
+        #[arg(long)]
+        output: String,
+        #[arg(long, default_value_t = 10.0)]
+        seconds: f64,
+        /// Write the last sprite PNG here.
+        #[arg(long)]
+        save: Option<std::path::PathBuf>,
+        /// Diagnostics: log every session event (constraints, ready/failed)
+        /// and write each captured sprite's raw shm bytes into this directory
+        /// as frame-N.raw with frame-N.txt (size, stride, byte order).
+        #[arg(long, value_name = "DIR")]
+        save_raw: Option<std::path::PathBuf>,
+    },
+    /// Capture -> encoded latency of the frame pipeline without a compositor:
+    /// a synthetic 60 Hz source writing into shm buffers as the compositor
+    /// would, then the session's handoff and encode loop.
+    PipelineBench {
+        /// Frame size, WxH.
+        #[arg(long, default_value = "4096x2304")]
+        size: String,
+        #[arg(long, default_value_t = 8.0)]
+        seconds: f64,
+        #[arg(long, default_value_t = 60)]
+        fps: u32,
+        /// Copy each frame out of one shm buffer (the pre-lease capture).
+        #[arg(long)]
+        copy: bool,
+        /// Let the encoder convert (no convert stage).
+        #[arg(long)]
+        no_stage: bool,
+        #[arg(long, default_value_t = 0)]
+        threads: u16,
+        #[arg(long, value_enum, default_value_t = encoder::Backend::X264)]
+        encoder: encoder::Backend,
+    },
     /// Through the detected backend: open (or adopt) a display, capture and
     /// encode `--frames` frames while moving the pointer over it, scroll
     /// once, tear down. Exits non-zero on any failed step (SENDER-PLAN §4.3).
@@ -88,6 +132,12 @@ pub enum Dev {
         frames: u32,
         #[arg(long, default_value_t = 20.0)]
         timeout: f64,
+        /// Output scale to ask for.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f64,
+        /// Where the output goes.
+        #[arg(long, default_value = "auto-right")]
+        position: Position,
         #[command(flatten)]
         backend: crate::BackendArgs,
     },
@@ -113,6 +163,18 @@ pub fn run(cmd: Dev) -> Result<()> {
             bitrate_mbps,
             encoder: backend,
         } => encode_bench(width, height, frames, threads, bitrate_mbps, backend),
+        Dev::PipelineBench {
+            size,
+            seconds,
+            fps,
+            copy,
+            no_stage,
+            threads,
+            encoder,
+        } => {
+            let (w, h) = parse_size(&size)?;
+            pipeline_bench(w, h, seconds, fps, copy, !no_stage, threads, encoder)
+        }
         Dev::InputTest {
             x,
             y,
@@ -179,14 +241,23 @@ pub fn run(cmd: Dev) -> Result<()> {
             cursor,
             save,
         } => capture_test(output, seconds, cursor, save),
+        Dev::CursorTest {
+            output,
+            seconds,
+            save,
+            save_raw,
+        } => cursor_test(&output, Duration::from_secs_f64(seconds), save, save_raw),
         Dev::Smoke {
             size,
             frames,
             timeout,
+            scale,
+            position,
             backend,
         } => smoke(
             &backend.request(),
             &size,
+            (scale, position),
             frames,
             Duration::from_secs_f64(timeout),
         ),
@@ -217,7 +288,7 @@ fn encode_bench(
         captured_at: Instant::now(),
         presentation_ns: None,
         buf: FrameBuf::Cpu {
-            pixels: vec![0u8; (stride * height) as usize],
+            pixels: vec![0u8; (stride * height) as usize].into(),
             width,
             height,
             stride,
@@ -228,7 +299,11 @@ fn encode_bench(
     let mut bytes = 0usize;
     for i in 0..frames {
         // Desktop-like content: text-ish noise blocks that shift each frame.
-        if let FrameBuf::Cpu { pixels, .. } = &mut frame.buf {
+        if let FrameBuf::Cpu {
+            pixels: Pixels::Owned(pixels),
+            ..
+        } = &mut frame.buf
+        {
             for y in 0..height as usize {
                 for x in 0..width as usize {
                     let v = (((x / 8 + y / 12 + i as usize) % 7) * 36) as u8;
@@ -257,6 +332,189 @@ fn encode_bench(
         times[n - 1],
         1000.0 / times[n / 2],
         bytes as f64 / n as f64 / 1024.0
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pipeline_bench(
+    width: u32,
+    height: u32,
+    seconds: f64,
+    fps: u32,
+    copy: bool,
+    use_stage: bool,
+    threads: u16,
+    backend: encoder::Backend,
+) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::backend::{Frame, PixelFormat};
+    use crate::latest;
+    use crate::wayland::shm_pool::{Mapping, Recycler};
+
+    let stride = width * 4;
+    let len = (stride * height) as usize;
+    // Eight desktop-like pictures that scroll, so every frame has motion.
+    let pictures: Vec<Vec<u8>> = (0..8)
+        .map(|i| {
+            let mut px = vec![0u8; len];
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let v = (((x / 8 + (y + i * 6) / 12) % 7) * 36) as u8;
+                    let o = y * stride as usize + x * 4;
+                    px[o..o + 4].copy_from_slice(&[v, v / 2 + 60, 255 - v, 255]);
+                }
+            }
+            px
+        })
+        .collect();
+
+    // The encode side, as in session.rs: latest-wins slot, rate cap, last
+    // frame kept for an IDR replay.
+    let settings = encoder::EncoderSettings {
+        backend,
+        bitrate_bps: 20_000_000,
+        max_fps: fps as f32,
+        threads: threads_or_all(threads),
+    };
+    let stage = encoder::ConvertStage::new();
+    let enc_stage = stage.clone();
+    let (raw_tx, raw_rx) = latest::channel::<Frame>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let enc_stop = stop.clone();
+    let encode = std::thread::spawn(move || -> Result<(Vec<f64>, Vec<f64>, &'static str)> {
+        let mut enc: Option<encoder::Encoder> = None;
+        let mut last: Option<Frame> = None;
+        let (mut lat, mut enc_ms) = (Vec::new(), Vec::new());
+        let min_interval = Duration::from_secs_f32(1.0 / settings.max_fps);
+        let mut last_start = Instant::now() - min_interval;
+        while !enc_stop.load(Ordering::Relaxed) {
+            let Ok(frame) = raw_rx.recv_timeout(Duration::from_millis(100)) else {
+                continue;
+            };
+            if let Some(wait) = min_interval.checked_sub(last_start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+            last_start = Instant::now();
+            if enc.is_none() {
+                let (w, h) = frame.dimensions();
+                let e = encoder::Encoder::new(w, h, settings)?;
+                enc_stage.bind(&e);
+                enc = Some(e);
+            }
+            let e = enc.as_mut().unwrap();
+            for u in e.encode(&frame, last.is_none())? {
+                lat.push(u.captured_at.elapsed().as_secs_f64() * 1000.0);
+                enc_ms.push(u.encode_ms);
+            }
+            last = Some(frame);
+        }
+        Ok((lat, enc_ms, enc.map_or("none", |e| e.label())))
+    });
+    let base: crate::backend::FrameSink = Box::new(move |ev| {
+        if let CaptureEvent::Frame(f) = ev {
+            raw_tx.send(f);
+        }
+    });
+    let mut sink = if use_stage { stage.sink(base) } else { base };
+
+    // The capture side: up to four shm buffers lent out (or one, copied out
+    // per frame, as before leases), written by "the compositor" at `fps`.
+    let recycler = Recycler::default();
+    let mut buffers: Vec<(std::fs::File, Arc<Mapping>)> = Vec::new();
+    let new_buffer = || -> Result<(std::fs::File, Arc<Mapping>)> {
+        let path = format!(
+            "/dev/shm/od-bench-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        );
+        let f = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let _ = std::fs::remove_file(&path);
+        f.set_len(len as u64)?;
+        let m = Arc::new(Mapping::new(&f, len)?);
+        Ok((f, m))
+    };
+    let period = Duration::from_secs_f64(1.0 / fps as f64);
+    let start = Instant::now();
+    let mut next = start;
+    let mut i = 0usize;
+    while start.elapsed().as_secs_f64() < seconds {
+        let index = if copy {
+            if buffers.is_empty() {
+                buffers.push(new_buffer()?);
+            }
+            0
+        } else {
+            match recycler.take() {
+                Some(x) => x,
+                None if buffers.len() < 4 => {
+                    buffers.push(new_buffer()?);
+                    buffers.len() - 1
+                }
+                None => {
+                    recycler.wait(Duration::from_millis(250));
+                    continue;
+                }
+            }
+        };
+        if let Some(wait) = next.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        next += period;
+        let (file, map) = &buffers[index];
+        file.write_all_at(&pictures[i % pictures.len()], 0)?;
+        i += 1;
+        let ready_at = Instant::now();
+        let pixels = if copy {
+            let mut v = vec![0u8; len];
+            file.read_exact_at(&mut v, 0)?;
+            Pixels::Owned(v)
+        } else {
+            Pixels::Leased(Box::new(recycler.lease(index, map.clone(), len)))
+        };
+        sink(CaptureEvent::Frame(Frame {
+            captured_at: ready_at,
+            presentation_ns: None,
+            buf: FrameBuf::Cpu {
+                pixels,
+                width,
+                height,
+                stride,
+                format: PixelFormat::Xrgb8888,
+            },
+        }));
+    }
+    drop(sink);
+    std::thread::sleep(Duration::from_millis(300));
+    stop.store(true, Ordering::Relaxed);
+    let (mut lat, mut enc_ms, label) = encode.join().expect("encode thread")?;
+    lat.sort_by(f64::total_cmp);
+    enc_ms.sort_by(f64::total_cmp);
+    let p = |v: &[f64], q: f64| {
+        v.get(((v.len() as f64 - 1.0) * q).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    info!(
+        "{label} {width}x{height} {} {}: {} frames {:.1} fps | capture->encoded p50 {:.1} ms p95 {:.1} ms | encode call p50 {:.1} ms",
+        if copy { "copy" } else { "lease" },
+        if use_stage && width >= encoder::MIN_STAGE_WIDTH {
+            "stage"
+        } else {
+            "no stage"
+        },
+        lat.len(),
+        lat.len() as f64 / seconds,
+        p(&lat, 0.5),
+        p(&lat, 0.95),
+        p(&enc_ms, 0.5),
     );
     Ok(())
 }
@@ -293,15 +551,15 @@ fn capture_test(
     cursor: bool,
     save: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let mut last: Option<(capture::FrameInfo, Vec<u8>)> = None;
+    let mut last: Option<(capture::FrameInfo, crate::wayland::shm_pool::Lease)> = None;
     let n = capture::capture_shm(
         output.as_deref(),
         cursor,
         Duration::from_secs_f64(seconds),
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        |info: &capture::FrameInfo, pixels: Vec<u8>| {
+        |info: &capture::FrameInfo, lease| {
             if save.is_some() {
-                last = Some((*info, pixels));
+                last = Some((*info, lease));
             }
         },
     )?;
@@ -320,6 +578,125 @@ fn capture_test(
     Ok(())
 }
 
+fn cursor_test(
+    output: &str,
+    seconds: Duration,
+    save: Option<std::path::PathBuf>,
+    save_raw: Option<std::path::PathBuf>,
+) -> Result<()> {
+    use crate::backend::CursorEvent;
+    let snap = crate::wayland::registry::snapshot()?;
+    let o = snap
+        .output(output)
+        .with_context(|| format!("no output {output}"))?;
+    let (w, h) = (o.width.max(1) as u32, o.height.max(1) as u32);
+    // As the backends see it: Hyprland reports logical units (see
+    // HyprlandOutput::cursor_space), others the protocol's pixels.
+    let space = match HyprlandIpc::from_env().and_then(|ipc| ipc.monitors()) {
+        Ok(ms) => {
+            let scale = ms
+                .iter()
+                .find(|m| m.name == output)
+                .map_or(1.0, |m| m.scale);
+            let highest = ms.iter().map(|m| m.scale).fold(1.0f64, f64::max);
+            crate::wayland::cursor::CursorSpace {
+                width: w as f64 / scale,
+                height: h as f64 / scale,
+                sprite_scale: highest,
+                theme_size: crate::wayland::cursor::theme_size(),
+            }
+        }
+        Err(_) => crate::wayland::cursor::CursorSpace::pixels(w, h),
+    };
+    info!(
+        "following the cursor on {output} ({w}x{h} px, positions in {:.1}x{:.1}, sprite scale up to {}, theme size {:?}) for {seconds:?}; move the pointer over it",
+        space.width, space.height, space.sprite_scale, space.theme_size
+    );
+    let debug_sink: Option<crate::wayland::cursor::DebugSink> = match save_raw {
+        Some(dir) => {
+            use crate::wayland::cursor::CursorDebug;
+            std::fs::create_dir_all(&dir)?;
+            let mut n = 0u32;
+            Some(Box::new(move |d: CursorDebug| match d {
+                CursorDebug::Raw {
+                    px,
+                    width,
+                    height,
+                    stride,
+                    format,
+                } => {
+                    n += 1;
+                    let base = dir.join(format!("frame-{n}"));
+                    let meta = format!("{width}x{height} stride {stride} order {format}\n");
+                    let r = std::fs::write(base.with_extension("raw"), &px)
+                        .and_then(|_| std::fs::write(base.with_extension("txt"), meta));
+                    match r {
+                        Ok(()) => info!("raw: wrote {}.raw ({} bytes)", base.display(), px.len()),
+                        Err(e) => warn!("raw: {e}"),
+                    }
+                }
+                other => info!("session: {other:?}"),
+            }))
+        }
+        None => None,
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<CursorEvent>();
+    let mut thread = crate::wayland::cursor::CursorThread::spawn_with_debug(
+        output,
+        space,
+        Box::new(move |ev| {
+            let _ = tx.send(ev);
+        }),
+        debug_sink,
+    )?;
+    let start = Instant::now();
+    let (mut moves, mut sprites) = (0u32, 0u32);
+    let mut last_png = None;
+    let mut last_log = Instant::now() - Duration::from_secs(1);
+    while start.elapsed() < seconds {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(CursorEvent::Moved { x, y }) => {
+                moves += 1;
+                if last_log.elapsed() >= Duration::from_millis(250) {
+                    info!("cursor at {x:.4},{y:.4} ({moves} updates)");
+                    last_log = Instant::now();
+                }
+            }
+            Ok(CursorEvent::Hidden) => info!("cursor hidden (left {output})"),
+            Ok(CursorEvent::SpriteUnavailable(why)) => warn!("no sprite: {why}"),
+            Ok(CursorEvent::Image {
+                png,
+                nw,
+                nh,
+                ax,
+                ay,
+            }) => {
+                sprites += 1;
+                info!(
+                    "sprite: {} bytes PNG, {:.4}x{:.4} of the display, hotspot {ax:.3},{ay:.3}",
+                    png.len(),
+                    nw,
+                    nh
+                );
+                last_png = Some(png);
+            }
+            Err(_) => {}
+        }
+    }
+    thread.stop();
+    let rate = moves as f64 / seconds.as_secs_f64();
+    info!("{moves} position updates ({rate:.0}/s), {sprites} sprites");
+    match (save, last_png) {
+        (Some(path), Some(png)) => {
+            std::fs::write(&path, png)?;
+            info!("wrote {}", path.display());
+        }
+        (Some(path), None) => warn!("no sprite arrived; {} not written", path.display()),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_size(s: &str) -> Result<(u32, u32)> {
     let (w, h) = s
         .split_once('x')
@@ -329,7 +706,13 @@ fn parse_size(s: &str) -> Result<(u32, u32)> {
 
 /// TODO(§4.3): `--connect <addr>` to stream to `od-receiver --sink none`
 /// instead of encoding locally.
-fn smoke(req: &detect::Request, size: &str, frames: u32, timeout: Duration) -> Result<()> {
+fn smoke(
+    req: &detect::Request,
+    size: &str,
+    (scale, position): (f64, Position),
+    frames: u32,
+    timeout: Duration,
+) -> Result<()> {
     let (width, height) = parse_size(size)?;
     let mut backend = detect::detect(req)?;
     info!("smoke: backend {}", backend.describe());
@@ -338,8 +721,8 @@ fn smoke(req: &detect::Request, size: &str, frames: u32, timeout: Duration) -> R
         width,
         height,
         hz: 60,
-        scale: 1.0,
-        position: Position::AutoRight,
+        scale,
+        position,
     };
     let mut vd = backend.open(&spec)?;
     info!("smoke: display {}", vd.info());
