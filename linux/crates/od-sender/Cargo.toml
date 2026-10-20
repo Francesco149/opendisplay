@@ -35,6 +35,7 @@ wayland-protocols = { workspace = true }
 wayland-protocols-wlr = { workspace = true }
 wayland-scanner = { workspace = true }
 wayland-backend = { workspace = true }
+bitflags = { workspace = true }
 pipewire = { workspace = true, optional = true }
 openh264 = { workspace = true }
 ffmpeg-next = { workspace = true }
