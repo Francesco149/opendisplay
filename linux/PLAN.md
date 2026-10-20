@@ -4,6 +4,9 @@ Status: **planning**, 2026-09-21. Supersedes the scope split in #284 (receiver
 only) and #84 (Linux sender, no plan). Everything below was researched and, where
 marked *verified*, tested on the machines listed in §1.
 
+Sender beta plan (2026-10-20): `SENDER-PLAN.md` supersedes the sender parts
+of §3.5, §3.6 and §4 M3/M4/M6 below.
+
 Goal: a native Rust **receiver** and **sender** for Linux, running on `x86_64`
 and `aarch64`, built as a clean-room implementation against `PROTOCOL.md`
 (`pv` 3). Omarchy (Arch + Hyprland) is the first target; a NixOS headless kiosk
