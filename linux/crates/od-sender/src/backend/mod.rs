@@ -269,6 +269,12 @@ pub trait VirtualDisplay: Send {
     }
     /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
+    /// `Some(why)` when the compositor changed the display away from its
+    /// spec (Hyprland: a config reload); the session then rebuilds it from
+    /// the same spec. Called on every session tick: must be cheap.
+    fn drifted(&mut self) -> Option<String> {
+        None
+    }
     /// Resize in place; stops capture first.
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
     /// Input bound to this display. Call again after `reconfigure`.

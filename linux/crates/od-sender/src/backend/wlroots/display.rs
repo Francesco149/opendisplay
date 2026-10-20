@@ -3,6 +3,8 @@
 //! removed with `output <name> unplug`. Capture ordering is enforced by
 //! [`crate::wayland::display::CapturedDisplay`], which wraps this.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
@@ -17,7 +19,12 @@ pub struct WlrootsOutput {
     /// `od-<id>`: the lock and record key.
     lock_name: String,
     info: DisplayInfo,
+    last_check: Instant,
 }
+
+/// How often the output's mode and scale are compared with ours (a `swaymsg
+/// reload` re-applies config output rules, a catch-all included).
+const DRIFT_CHECK: Duration = Duration::from_secs(2);
 
 impl WlrootsOutput {
     /// Reuse the output a dead sender left for this display (the caller holds
@@ -54,6 +61,7 @@ impl WlrootsOutput {
                 x: 0,
                 y: 0,
             },
+            last_check: Instant::now(),
         };
         if let Err(e) = out.reconfigure(spec) {
             if let Err(r) = out.remove() {
@@ -120,8 +128,32 @@ impl OutputControl for WlrootsOutput {
             x: o.rect.x,
             y: o.rect.y,
         };
+        self.last_check = Instant::now();
         info!("virtual display {}", self.info);
         Ok(())
+    }
+
+    fn drifted(&mut self) -> Option<String> {
+        if self.info.width == 0 || self.last_check.elapsed() < DRIFT_CHECK {
+            return None;
+        }
+        self.last_check = Instant::now();
+        let o = self.ipc.output(&self.info.name).ok().flatten()?;
+        let mode = o.current_mode.unwrap_or_default();
+        let scale = o.scale.unwrap_or(self.info.scale);
+        let changed = (mode.width, mode.height) != (self.info.width, self.info.height)
+            || (scale - self.info.scale).abs() > 1e-3;
+        changed.then(|| {
+            format!(
+                "{} is {}x{} scale {scale}, set {}x{} scale {}",
+                self.info.name,
+                mode.width,
+                mode.height,
+                self.info.width,
+                self.info.height,
+                self.info.scale
+            )
+        })
     }
 
     fn remove(&mut self) -> Result<()> {
