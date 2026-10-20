@@ -104,7 +104,7 @@ Useful `run` options:
 |---|---|---|
 | `--to` | first receiver found | Receiver name, id, or `host:port` |
 | `--position` | `auto-right` | Where the output goes: `auto-right`, `auto-left`, `auto-up`, `auto-down`, or `x,y` |
-| `--scale` | `passthrough` | Output scale: `passthrough` (the receiver's own, 3 on most iPhones), `mac` (2 for Retina-class screens, else 1, like the Mac sender) or a number. GNOME rounds to the nearest scale it offers for that size (an iPhone's 3 becomes 2); KDE Plasma picks its own, see [KDE Plasma](#kde-plasma) |
+| `--scale` | `passthrough` | Output scale: `passthrough` (the receiver's own, 3 on most iPhones), `mac` (2 for Retina-class screens, else 1, like the Mac sender) or a number. GNOME rounds to the nearest scale it offers for that size (an iPhone's 3 becomes 2) |
 | `--bitrate-mbps` | `20` | Video bitrate |
 | `--max-fps` | receiver's panel rate | Frame-rate cap |
 | `--encoder` | `auto` | `auto`, `v4l2m2m`, `x264` or `openh264` |
@@ -183,9 +183,12 @@ KDE Plasma 6.8 or newer lets `od-sender` create a virtual output and move the
 pointer with no dialog. **Plasma 6.7 and older** only grant that to a program
 named by an installed desktop entry, so there it works with the packaged
 `/usr/bin/od-sender` (the AUR package and the tarballs ship
-`od-sender.desktop`) but not with a build run from elsewhere. Plasma chooses
-the virtual output's scale itself; set one once in System Settings → Display
-for `Virtual-od-…` and Plasma reuses it for that receiver.
+`od-sender.desktop`) but not with a build run from elsewhere. Scale and
+position are set like on the other desktops. Plasma does not allow outputs at
+negative coordinates, so `--position auto-left` or `auto-up` puts the new
+output at the top left and shifts your other screens right or down; they move
+back when the sender exits, but not after a crash (then open System Settings →
+Display once, or start the sender again).
 
 ### GNOME
 
