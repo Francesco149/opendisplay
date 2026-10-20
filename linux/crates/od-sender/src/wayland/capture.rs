@@ -457,6 +457,22 @@ pub fn capture_shm(
                     continue;
                 }
             };
+            // Hyprland 0.56.2 segfaults on a create_frame for an output whose
+            // monitor is already gone (research/hyprland-screenshare-
+            // transform.md): read what the compositor sent without blocking,
+            // and never create a frame on a stopped session.
+            dispatch_with_timeout(&conn, &mut queue, &mut st, Duration::ZERO)?;
+            if !may_create_frame(&st.session, stop.load(Ordering::Relaxed)) {
+                recycler.release(index);
+                break;
+            }
+            if (st.buffers[index].width, st.buffers[index].height)
+                != (st.session.width, st.session.height)
+            {
+                // Resized meanwhile: the top of the loop reallocates.
+                recycler.release(index);
+                continue;
+            }
             let frame = session.create_frame(&qh, ());
             let b = &st.buffers[index];
             frame.attach_buffer(&b.buffer);
@@ -494,15 +510,22 @@ pub fn capture_shm(
             if let Some(f) = st.frame.take() {
                 f.destroy();
             }
-            if matches!(
-                reason,
-                WEnum::Value(ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints)
-            ) {
-                recycler.reset();
-                st.buffers.clear();
-                st.attached = None;
-            } else if let Some(index) = st.attached.take() {
-                recycler.release(index);
+            match after_failure(reason) {
+                AfterFailure::Reallocate => {
+                    recycler.reset();
+                    st.buffers.clear();
+                    st.attached = None;
+                }
+                AfterFailure::Retry => {
+                    if let Some(index) = st.attached.take() {
+                        recycler.release(index);
+                    }
+                }
+                AfterFailure::EndSession => {
+                    // The session is done even if its own `stopped` event has
+                    // not been dispatched yet.
+                    st.session.stopped = true;
+                }
             }
         }
     }
@@ -525,6 +548,32 @@ pub fn capture_shm(
         );
     }
     Ok(st.frames_ready)
+}
+
+/// Whether the loop may send another `create_frame`: never on a stopped
+/// session or after a stop request. One frame is in flight at a time (the
+/// loop only creates one when the previous is done).
+fn may_create_frame(session: &SessionInfo, stop_requested: bool) -> bool {
+    !session.stopped && !stop_requested
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AfterFailure {
+    /// Same buffers, next frame.
+    Retry,
+    /// The buffers no longer fit the session's constraints.
+    Reallocate,
+    /// The session is over (output gone): no further frame on it.
+    EndSession,
+}
+
+fn after_failure(reason: WEnum<ext_image_copy_capture_frame_v1::FailureReason>) -> AfterFailure {
+    use ext_image_copy_capture_frame_v1::FailureReason;
+    match reason {
+        WEnum::Value(FailureReason::BufferConstraints) => AfterFailure::Reallocate,
+        WEnum::Value(FailureReason::Stopped) => AfterFailure::EndSession,
+        _ => AfterFailure::Retry,
+    }
 }
 
 fn pick_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
@@ -588,4 +637,36 @@ fn libc_pollfd(fd: i32) -> PollFd {
 unsafe extern "C" {
     #[link_name = "poll"]
     fn libc_poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ext_image_copy_capture_frame_v1::FailureReason;
+
+    #[test]
+    fn no_frame_on_a_stopped_session_or_after_stop() {
+        let mut s = SessionInfo::default();
+        assert!(may_create_frame(&s, false));
+        assert!(!may_create_frame(&s, true));
+        s.stopped = true;
+        assert!(!may_create_frame(&s, false));
+    }
+
+    #[test]
+    fn a_stopped_frame_ends_the_session() {
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::Stopped)),
+            AfterFailure::EndSession
+        );
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::BufferConstraints)),
+            AfterFailure::Reallocate
+        );
+        assert_eq!(
+            after_failure(WEnum::Value(FailureReason::Unknown)),
+            AfterFailure::Retry
+        );
+        assert_eq!(after_failure(WEnum::Unknown(99)), AfterFailure::Retry);
+    }
 }
