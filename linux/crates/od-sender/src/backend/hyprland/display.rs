@@ -3,7 +3,7 @@
 //! [`crate::wayland::display::CapturedDisplay`], which wraps this.
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::ipc::{HyprlandIpc, Monitor};
 use crate::backend::{DisplayInfo, DisplaySpec};
@@ -29,8 +29,10 @@ fn info_of(m: &Monitor) -> DisplayInfo {
 
 impl HyprlandOutput {
     /// Create the output unless a leftover of the same name exists (the
-    /// caller holds its lock, so no sender is using it), then size it.
+    /// caller holds its lock, so no sender is using it), then size it. An
+    /// output this call created is removed again if sizing fails.
     pub fn open(ipc: HyprlandIpc, spec: &DisplaySpec) -> Result<Self> {
+        let existed = ipc.monitor(&spec.name)?.is_some();
         let mut out = Self {
             info: DisplayInfo {
                 name: spec.name.clone(),
@@ -43,7 +45,18 @@ impl HyprlandOutput {
             },
             ipc,
         };
-        out.reconfigure(spec)?;
+        if let Err(e) = out.reconfigure(spec) {
+            if !existed && out.ipc.monitor(&spec.name).ok().flatten().is_some() {
+                match out.ipc.remove_output(&spec.name) {
+                    Ok(()) => info!("removed {} after a failed setup", spec.name),
+                    Err(re) => warn!(
+                        "could not remove {} after a failed setup: {re:#}",
+                        spec.name
+                    ),
+                }
+            }
+            return Err(e);
+        }
         Ok(out)
     }
 }
