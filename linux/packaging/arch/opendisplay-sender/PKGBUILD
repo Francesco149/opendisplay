@@ -47,6 +47,7 @@ build() {
   cd "opendisplay-${_tag}/linux"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  export OD_SENDER_VERSION="${_tag#linux-v}"  # no .git in the tarball
   cargo build --frozen --release -p od-sender
 }
 
@@ -54,6 +55,7 @@ check() {
   cd "opendisplay-${_tag}/linux"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  export OD_SENDER_VERSION="${_tag#linux-v}"  # no .git in the tarball
   # Unit tests only: nothing here needs a compositor or the network.
   cargo test --frozen --release -p od-sender
 }

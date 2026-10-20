@@ -25,7 +25,7 @@ use backend::{BackendId, Position};
 /// OpenDisplay sender for Linux: extends a Wayland desktop onto an
 /// OpenDisplay receiver.
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version = env!("OD_SENDER_VERSION"), about)]
 struct Args {
     /// Target one of several running Hyprland instances, like `hyprctl -i`
     /// (index from `od-sender doctor`, or the full signature). Sets
