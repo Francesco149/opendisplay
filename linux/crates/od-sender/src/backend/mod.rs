@@ -220,6 +220,15 @@ pub trait Backend: Send {
     /// backends that fix it when the output is created rather than per
     /// capture. Called before the first [`open`](Self::open).
     fn set_cursor_visible(&mut self, _visible: bool) {}
+    /// Whether [`show_workspace`](Self::show_workspace) works here.
+    fn supports_workspaces(&self) -> bool {
+        false
+    }
+    /// Show workspace `name` (a name or number) on `output`, leaving the
+    /// user's focus where it was. Called after every open and recreation.
+    fn show_workspace(&mut self, _output: &str, _name: &str) -> Result<()> {
+        bail!("workspaces are not supported on this desktop")
+    }
     /// The output lock [`open`](Self::open) takes for `spec`.
     fn lock_name(&self, spec: &DisplaySpec) -> String {
         spec.name.clone()
@@ -260,6 +269,12 @@ pub trait VirtualDisplay: Send {
     }
     /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
+    /// `Some(why)` when the compositor changed the display away from its
+    /// spec (Hyprland: a config reload); the session then rebuilds it from
+    /// the same spec. Called on every session tick: must be cheap.
+    fn drifted(&mut self) -> Option<String> {
+        None
+    }
     /// Resize in place; stops capture first.
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
     /// Input bound to this display. Call again after `reconfigure`.

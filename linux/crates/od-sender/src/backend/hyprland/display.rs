@@ -2,8 +2,12 @@
 //! and removed over IPC. Capture ordering is enforced by
 //! [`crate::wayland::display::CapturedDisplay`], which wraps this.
 
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use tracing::{info, warn};
+
+use super::events::ReloadWatcher;
 
 use super::ipc::{HyprlandIpc, Monitor};
 use crate::backend::{DisplayInfo, DisplaySpec};
@@ -13,6 +17,29 @@ use crate::wayland::display::OutputControl;
 pub struct HyprlandOutput {
     ipc: HyprlandIpc,
     info: DisplayInfo,
+    /// The spec last applied: what a config reload or drift is undone to.
+    spec: Option<DisplaySpec>,
+    reloads: Option<ReloadWatcher>,
+    last_check: Instant,
+}
+
+/// After `configreloaded`, wait this long for Hyprland to finish
+/// re-applying its own monitor rules before restoring ours.
+const RELOAD_SETTLE: Duration = Duration::from_millis(200);
+/// How often the output's mode and scale are compared with ours.
+const DRIFT_CHECK: Duration = Duration::from_secs(2);
+
+/// How `m` differs from what was applied, if it does. Only mode and scale:
+/// the stream depends on them. A position the user changed is theirs.
+pub fn drift(applied: &DisplayInfo, m: &Monitor) -> Option<String> {
+    let mode = (m.width, m.height) != (applied.width, applied.height);
+    let scale = (m.scale - applied.scale).abs() > 1e-3;
+    (mode || scale).then(|| {
+        format!(
+            "{} is {}x{} scale {}, set {}x{} scale {}",
+            m.name, m.width, m.height, m.scale, applied.width, applied.height, applied.scale
+        )
+    })
 }
 
 fn info_of(m: &Monitor) -> DisplayInfo {
@@ -43,6 +70,9 @@ impl HyprlandOutput {
                 x: 0,
                 y: 0,
             },
+            reloads: None,
+            spec: None,
+            last_check: Instant::now(),
             ipc,
         };
         if let Err(e) = out.reconfigure(spec) {
@@ -56,6 +86,10 @@ impl HyprlandOutput {
                 }
             }
             return Err(e);
+        }
+        match ReloadWatcher::spawn(out.ipc.event_socket()) {
+            Ok(w) => out.reloads = Some(w),
+            Err(e) => warn!("not watching Hyprland config reloads: {e}"),
         }
         Ok(out)
     }
@@ -82,8 +116,27 @@ impl OutputControl for HyprlandOutput {
             spec.position,
         )?;
         self.info = info_of(&m);
+        self.spec = Some(spec.clone());
+        self.last_check = Instant::now();
         info!("virtual display {}", self.info);
         Ok(())
+    }
+
+    fn drifted(&mut self) -> Option<String> {
+        if self
+            .reloads
+            .as_ref()
+            .is_some_and(|w| w.take_settled(RELOAD_SETTLE))
+        {
+            return Some("Hyprland config reloaded".into());
+        }
+        if self.spec.is_none() || self.last_check.elapsed() < DRIFT_CHECK {
+            return None;
+        }
+        self.last_check = Instant::now();
+        // A missing output is the capture-loss path's business.
+        let m = self.ipc.monitor(&self.info.name).ok().flatten()?;
+        drift(&self.info, &m)
     }
 
     /// Hyprland 0.56.2 reports cursor positions and hotspots in logical
@@ -110,5 +163,41 @@ impl OutputControl for HyprlandOutput {
         self.ipc.remove_output(&self.info.name)?;
         info!("removed virtual display {}", self.info.name);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(w: u32, h: u32, scale: f64, x: i32) -> Monitor {
+        Monitor {
+            id: 1,
+            name: "od-1f046d".into(),
+            description: String::new(),
+            width: w,
+            height: h,
+            refresh_rate: 60.0,
+            x,
+            y: 0,
+            scale,
+            focused: false,
+            active_workspace: None,
+        }
+    }
+
+    #[test]
+    fn mode_and_scale_drift_but_position_is_the_users() {
+        let applied = info_of(&monitor(4096, 2304, 2.0, -2048));
+        assert_eq!(drift(&applied, &monitor(4096, 2304, 2.0, -2048)), None);
+        // The user dragged it elsewhere: theirs.
+        assert_eq!(drift(&applied, &monitor(4096, 2304, 2.0, 1917)), None);
+        // `hyprctl reload` with a catch-all `preferred`/`auto` rule, as seen live.
+        let why = drift(&applied, &monitor(1920, 1080, 1.3333, 1917)).unwrap();
+        assert!(
+            why.contains("1920x1080") && why.contains("4096x2304"),
+            "{why}"
+        );
+        assert!(drift(&applied, &monitor(4096, 2304, 1.5, -2048)).is_some());
     }
 }

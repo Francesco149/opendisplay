@@ -60,6 +60,8 @@ pub struct RunOptions {
     pub cursor: CursorMode,
     /// Where the virtual output goes.
     pub position: Position,
+    /// Workspace to show on the virtual output (`--workspace`).
+    pub workspace: Option<String>,
     /// Leave the virtual output in place when the session ends.
     pub keep_output: bool,
     pub reconnect: bool,
@@ -90,6 +92,7 @@ impl RunOptions {
             .over(&config::builtin());
         RunOptions {
             position: eff.position.unwrap_or(self.position),
+            workspace: eff.workspace.or_else(|| self.workspace.clone()),
             bitrate_mbps: eff.bitrate_mbps.unwrap_or(self.bitrate_mbps),
             desktop: DesktopOptions {
                 scale: eff.scale.unwrap_or(self.desktop.scale),
@@ -482,6 +485,9 @@ fn build(
             None
         }
     };
+    if let Some(ws) = &opts.workspace {
+        place_workspace(backend, &display.info().name, ws);
+    }
     let stream = stream_for(display.info(), &target);
     *active = Some(Active {
         input,
@@ -492,6 +498,25 @@ fn build(
         held_position: None,
     });
     Ok(stream)
+}
+
+/// Show `--workspace` on the display; a desktop without the feature says
+/// so once per process, and a failure never ends the session.
+fn place_workspace(backend: &mut dyn Backend, output: &str, ws: &str) {
+    static UNSUPPORTED_SAID: AtomicBool = AtomicBool::new(false);
+    if !backend.supports_workspaces() {
+        if !UNSUPPORTED_SAID.swap(true, Ordering::Relaxed) {
+            warn!(
+                "--workspace is not supported on this desktop ({}); ignoring it",
+                backend.id()
+            );
+        }
+        return;
+    }
+    match backend.show_workspace(output, ws) {
+        Ok(()) => info!("workspace {ws} on {output}"),
+        Err(e) => warn!("could not show workspace {ws} on {output}: {e:#}"),
+    }
 }
 
 /// Resolves to `true` on SIGINT, SIGTERM or SIGHUP. Handled explicitly so the output
@@ -816,6 +841,10 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     // `opts` with this receiver's config table applied, once its hello names it.
     let mut ropts = opts.clone();
     let mut debounce: Debounce<Target> = Debounce::new(desktop::HELLO_DEBOUNCE);
+    // Restores after the compositor changed the display behind our back; past
+    // the budget the sender stops fighting and leaves it as configured.
+    let mut drifts = LossBudget::default();
+    let mut drift_given_up = false;
     let mut buf = vec![0u8; 64 * 1024];
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut stats_tick = tokio::time::interval(Duration::from_secs(5));
@@ -924,6 +953,28 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 }
                 _ = tick.tick() => {
                     if opts.duration.is_some_and(|d| start.elapsed() >= d) { return Ok(SessionEnd::Ended); }
+                    let why = if drift_given_up { None } else { active.as_mut().and_then(|a| a.display.drifted()) };
+                    if let Some(why) = why {
+                        let target = active.as_ref().map(|a| a.target.clone()).expect("drift implies active");
+                        let spec = &target.spec;
+                        if drifts.allow(Instant::now()) {
+                            info!(
+                                "{why}: restoring {} to {}x{} @{} scale {} ({:?})",
+                                spec.name, spec.width, spec.height, spec.hz, spec.scale, spec.position
+                            );
+                            let cur = cursor_for(&ropts, backend, &sess);
+                            match build(backend, &mut active, target, &ropts, cur.as_ref()) {
+                                Ok(plan) => send_stream_config(&mut stream, &sess, &plan).await?,
+                                Err(e) => {
+                                    warn!("cannot restore the virtual display: {e:#}; closing the connection");
+                                    return Ok(SessionEnd::DisplayLost);
+                                }
+                            }
+                        } else {
+                            drift_given_up = true;
+                            warn!("{why}: {} keeps changing; leaving it as the compositor configured it", spec.name);
+                        }
+                    }
                     sess.handle(now(start), SenderEvent::Tick)
                 }
                 _ = stats_tick.tick() => {
@@ -1049,6 +1100,7 @@ mod tests {
             encoder: crate::encoder::Backend::Auto,
             cursor: CursorMode::Auto,
             position: Position::AutoRight,
+            workspace: None,
             keep_output: false,
             reconnect: false,
             duration: None,
@@ -1120,6 +1172,8 @@ mod tests {
         sink: Arc<Mutex<Option<FrameSink>>>,
         fail_reconfigure: Arc<AtomicBool>,
         panic_on_input: Arc<AtomicBool>,
+        /// Reported once by the next `drifted()` while a display exists.
+        drift: Arc<Mutex<Option<String>>>,
         cursor_sink: Arc<Mutex<Option<crate::backend::CursorSink>>>,
         painted: Arc<Mutex<Option<bool>>>,
     }
@@ -1189,6 +1243,9 @@ mod tests {
     }
 
     impl VirtualDisplay for FakeDisplay {
+        fn drifted(&mut self) -> Option<String> {
+            self.0.drift.lock().unwrap().take()
+        }
         fn info(&self) -> &DisplayInfo {
             &self.1
         }
@@ -1505,6 +1562,67 @@ mod tests {
     /// `streamConfig`, `events` come from the display's cursor thread. Returns
     /// the receiver's cursor messages (cursor, cursorImg) in order, and the
     /// fake's shared state.
+    /// The compositor changed the display (a Hyprland config reload): the
+    /// session rebuilds it from the same spec and announces the stream again.
+    #[tokio::test]
+    async fn a_drifted_display_is_restored_from_its_spec() {
+        let (hello, name) = test_hello("dr");
+        let shared = Shared::default();
+        *shared.drift.lock().unwrap() = Some("Hyprland config reloaded".into());
+        let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 16);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut backend = FakeBackend(shared.clone());
+        let task = tokio::spawn(async move {
+            let mut budget = LossBudget::default();
+            session(
+                sender_io,
+                &mut backend,
+                &opts(),
+                Instant::now(),
+                shutdown_rx,
+                &mut budget,
+                None,
+            )
+            .await
+        });
+        let mut rx = ReceiverSession::new(ReceiverConfig::new(hello));
+        let rx_now = || Now::new(Duration::from_secs(1), 1e6);
+        for a in rx.handle(rx_now(), ReceiverEvent::Connected) {
+            if let ReceiverAction::Send(b) = a {
+                receiver_io.write_all(&b).await.unwrap();
+            }
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        let mut configs = 0;
+        while configs < 2 {
+            let n = tokio::time::timeout(Duration::from_secs(5), receiver_io.read(&mut buf))
+                .await
+                .expect("no second streamConfig")
+                .unwrap();
+            assert!(n > 0);
+            configs += rx
+                .handle(rx_now(), ReceiverEvent::Bytes(&buf[..n]))
+                .iter()
+                .filter(|a| matches!(a, ReceiverAction::StreamConfig(_)))
+                .count();
+        }
+        drop(receiver_io);
+        task.await.unwrap().unwrap();
+        forget_lock(&name);
+        let log = shared.entries();
+        assert_eq!(
+            &log[..4],
+            [
+                format!("open {name}").as_str(),
+                "start_capture",
+                "stop_capture",
+                "reconfigure"
+            ],
+            "{log:?}"
+        );
+        assert_eq!(log[4], "start_capture");
+    }
+
     async fn cursor_session(tag: &str, events: Vec<CursorEvent>) -> (Vec<ReceiverAction>, Shared) {
         let (mut hello, name) = test_hello(tag);
         hello.cursor_port = Some(9001);

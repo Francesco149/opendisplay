@@ -77,6 +77,7 @@ struct RawOverride {
     position: Option<String>,
     scale: Option<ScaleValue>,
     bitrate_mbps: Option<f32>,
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -90,6 +91,7 @@ struct RawConfig {
     encoder: Option<String>,
     cursor: Option<CursorValue>,
     capture: Option<String>,
+    workspace: Option<String>,
     #[serde(default)]
     receiver: BTreeMap<String, RawOverride>,
 }
@@ -100,6 +102,8 @@ pub struct Layer {
     pub position: Option<Position>,
     pub scale: Option<ScalePolicy>,
     pub bitrate_mbps: Option<f32>,
+    /// Workspace to show on the virtual output (Hyprland, Sway).
+    pub workspace: Option<String>,
 }
 
 impl Layer {
@@ -109,6 +113,7 @@ impl Layer {
             position: self.position.or(below.position),
             scale: self.scale.or(below.scale),
             bitrate_mbps: self.bitrate_mbps.or(below.bitrate_mbps),
+            workspace: self.workspace.clone().or_else(|| below.workspace.clone()),
         }
     }
 }
@@ -131,7 +136,11 @@ fn layer(
     position: Option<String>,
     scale: Option<ScaleValue>,
     bitrate: Option<f32>,
+    workspace: Option<String>,
 ) -> Result<Layer> {
+    if workspace.as_deref().is_some_and(|w| w.trim().is_empty()) {
+        anyhow::bail!("workspace: empty");
+    }
     if let Some(b) = bitrate {
         if !(b.is_finite() && b > 0.0) {
             anyhow::bail!("bitrate-mbps: {b} is not a positive number");
@@ -144,6 +153,7 @@ fn layer(
             .context("position")?,
         scale: scale.map(|s| s.policy()).transpose()?,
         bitrate_mbps: bitrate,
+        workspace,
     })
 }
 
@@ -152,7 +162,7 @@ impl Config {
         let raw: RawConfig = toml::from_str(text)?;
         let mut receivers = BTreeMap::new();
         for (key, o) in raw.receiver {
-            let l = layer(o.position, o.scale, o.bitrate_mbps)
+            let l = layer(o.position, o.scale, o.bitrate_mbps, o.workspace)
                 .with_context(|| format!("[receiver.\"{key}\"]"))?;
             receivers.insert(key, l);
         }
@@ -168,7 +178,7 @@ impl Config {
                 .capture
                 .map(|c| CaptureChoice::from_str(&c, true).map_err(|m| anyhow!("capture: {m}")))
                 .transpose()?,
-            defaults: layer(raw.position, raw.scale, raw.bitrate_mbps)?,
+            defaults: layer(raw.position, raw.scale, raw.bitrate_mbps, raw.workspace)?,
             receivers,
         })
     }
@@ -213,6 +223,7 @@ pub fn builtin() -> Layer {
         position: Some(Position::AutoRight),
         scale: Some(ScalePolicy::Passthrough),
         bitrate_mbps: Some(20.0),
+        workspace: None,
     }
 }
 
@@ -260,6 +271,7 @@ mod tests {
                 position: Some(Position::AutoLeft),
                 scale: Some(ScalePolicy::Mac),
                 bitrate_mbps: Some(25.0),
+                workspace: None,
             }
         );
         let (_, phone) = c.receiver(&[Some("3f2a9c1e-aaaa")]).unwrap();
@@ -282,6 +294,18 @@ mod tests {
         .unwrap();
         assert_eq!(c.defaults.bitrate_mbps, Some(20.0));
         assert_eq!(c.receivers.len(), 1);
+    }
+
+    #[test]
+    fn workspace_is_a_default_and_a_receiver_override() {
+        let c =
+            Config::parse("workspace = \"8\"\n[receiver.phone]\nworkspace = \"web\"\n").unwrap();
+        assert_eq!(c.defaults.workspace.as_deref(), Some("8"));
+        let (_, phone) = c.receiver(&[Some("phone")]).unwrap();
+        assert_eq!(phone.workspace.as_deref(), Some("web"));
+        let eff = Layer::default().over(phone).over(&c.defaults);
+        assert_eq!(eff.workspace.as_deref(), Some("web"));
+        assert!(Config::parse("workspace = \" \"").is_err());
     }
 
     #[test]

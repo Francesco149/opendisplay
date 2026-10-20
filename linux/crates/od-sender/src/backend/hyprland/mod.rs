@@ -2,13 +2,15 @@
 //! driven through the shared `wayland/*` protocols.
 
 pub mod display;
+pub mod events;
 pub mod instance;
 pub mod ipc;
+pub mod workspace;
 
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use self::display::HyprlandOutput;
 use self::ipc::HyprlandIpc;
@@ -81,6 +83,55 @@ impl HyprlandBackend {
 impl Backend for HyprlandBackend {
     fn id(&self) -> BackendId {
         BackendId::Hyprland
+    }
+
+    fn supports_workspaces(&self) -> bool {
+        true
+    }
+
+    fn show_workspace(&mut self, output: &str, name: &str) -> Result<()> {
+        let ipc = self.ipc();
+        let monitors = ipc.monitors()?;
+        let workspaces = ipc.workspaces()?;
+        let ws = workspaces.iter().find(|w| w.matches(name));
+        let before = workspace::Before {
+            workspace_on: ws.map(|w| w.monitor.clone()),
+            already_shown: monitors.iter().any(|m| {
+                m.name == output && m.active_workspace.as_ref().is_some_and(|a| a.matches(name))
+            }),
+            focused: monitors.iter().find(|m| m.focused).map(|m| m.name.clone()),
+            cursor: ipc.cursor_pos().ok(),
+        };
+        let steps = workspace::plan(name, output, &before);
+        for step in &steps {
+            debug!("workspace: dispatch {step}");
+            ipc.dispatch(step)?;
+        }
+        // Give focus a moment to settle, then make sure the user has it back:
+        // a late event (the workspace's creation, a pointer move) may refocus.
+        if let Some(prev) = before
+            .focused
+            .as_deref()
+            .filter(|p| *p != output && !steps.is_empty())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = ipc
+                .monitors()?
+                .into_iter()
+                .find(|m| m.focused)
+                .map(|m| m.name);
+            if now.as_deref() != Some(prev) {
+                warn!(
+                    "workspace: focus is on {} after placing {name}; focusing {prev} again",
+                    now.as_deref().unwrap_or("nothing")
+                );
+                for step in workspace::restore(prev, before.cursor) {
+                    debug!("workspace: dispatch {step}");
+                    ipc.dispatch(&step)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn describe(&self) -> String {

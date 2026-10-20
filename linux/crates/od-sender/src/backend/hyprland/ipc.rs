@@ -28,6 +28,36 @@ pub struct Monitor {
     pub scale: f64,
     #[serde(default)]
     pub focused: bool,
+    #[serde(rename = "activeWorkspace", default)]
+    pub active_workspace: Option<WorkspaceRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WorkspaceRef {
+    pub id: i64,
+    pub name: String,
+}
+
+/// `j/workspaces`, the fields the sender reads.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Workspace {
+    pub id: i64,
+    pub name: String,
+    pub monitor: String,
+}
+
+impl Workspace {
+    /// Whether `selector` (a name or a number, as given to `--workspace`)
+    /// names this workspace.
+    pub fn matches(&self, selector: &str) -> bool {
+        self.name == selector || selector.parse::<i64>().is_ok_and(|id| id == self.id)
+    }
+}
+
+impl WorkspaceRef {
+    pub fn matches(&self, selector: &str) -> bool {
+        self.name == selector || selector.parse::<i64>().is_ok_and(|id| id == self.id)
+    }
 }
 
 /// `j/version`, the fields the sender reads.
@@ -75,6 +105,11 @@ pub fn socket_path(runtime_dir: &Path, sig: &str) -> PathBuf {
 impl HyprlandIpc {
     pub fn new(socket: PathBuf) -> Self {
         Self { socket }
+    }
+
+    /// The event socket next to the request socket.
+    pub fn event_socket(&self) -> PathBuf {
+        self.socket.with_file_name(".socket2.sock")
     }
 
     pub fn from_env() -> Result<Self> {
@@ -183,6 +218,33 @@ impl HyprlandIpc {
             std::thread::sleep(Duration::from_millis(50));
         }
         bail!("output {name} did not take mode {width}x{height}@{hz} scale {scale}")
+    }
+
+    pub fn workspaces(&self) -> Result<Vec<Workspace>> {
+        let json = self.request("j/workspaces")?;
+        serde_json::from_str(&json).with_context(|| format!("parsing workspaces: {json}"))
+    }
+
+    /// The pointer in layout coordinates.
+    pub fn cursor_pos(&self) -> Result<(f64, f64)> {
+        #[derive(Deserialize)]
+        struct Pos {
+            x: f64,
+            y: f64,
+        }
+        let json = self.request("j/cursorpos")?;
+        let p: Pos =
+            serde_json::from_str(&json).with_context(|| format!("parsing cursorpos: {json}"))?;
+        Ok((p.x, p.y))
+    }
+
+    /// Run one Lua dispatcher expression (`hl.dsp…`); Hyprland answers `ok`.
+    pub fn dispatch(&self, expr: &str) -> Result<()> {
+        let r = self.request(&format!("dispatch {expr}"))?;
+        if r.trim() != "ok" {
+            bail!("dispatch {expr}: {}", r.trim());
+        }
+        Ok(())
     }
 
     pub fn remove_output(&self, name: &str) -> Result<()> {
