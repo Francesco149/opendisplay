@@ -43,9 +43,11 @@ if [ -z "${OD_GNOME_INNER:-}" ]; then
   plugin_args=()
   if [ -n "$R" ]; then
     mutter_bin="$R/usr/bin/mutter"
-    export LD_LIBRARY_PATH="$R/usr/lib:$(echo "$R"/usr/lib/mutter-[0-9]*)"
+    mutter_libs=("$R"/usr/lib/mutter-[0-9]*)
+    LD_LIBRARY_PATH="$R/usr/lib:${mutter_libs[0]}"
+    export LD_LIBRARY_PATH
     export XDG_DATA_DIRS="$R/usr/share:/usr/share"
-    plugin_args=(--mutter-plugin="$(echo "$R"/usr/lib/mutter-[0-9]*/plugins/libdefault.so)")
+    plugin_args=(--mutter-plugin="${mutter_libs[0]}/plugins/libdefault.so")
   fi
   cp /usr/share/glib-2.0/schemas/*.xml "$B/schemas/" 2>/dev/null || true
   [ -n "$R" ] && cp "$R"/usr/share/glib-2.0/schemas/*.xml "$B/schemas/"
@@ -68,7 +70,12 @@ fi
 
 # Inside: private session bus, no system bus.
 logs="$OD_LOGS"
-cleanup() { kill $(jobs -p) 2>/dev/null || true; wait 2>/dev/null || true; }
+cleanup() {
+  local pids
+  mapfile -t pids < <(jobs -p)
+  [ "${#pids[@]}" -eq 0 ] || kill "${pids[@]}" 2>/dev/null || true
+  wait 2>/dev/null || true
+}
 trap cleanup EXIT
 
 pipewire >"$logs/pipewire.log" 2>&1 &
