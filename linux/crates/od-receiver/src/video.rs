@@ -147,6 +147,8 @@ pub mod gst_out {
         desc: String,
         pipeline: gst::Pipeline,
         appsrc: gst_app::AppSrc,
+        /// `Gtk` only: the paintable sink (inside glsinkbin on the GL path).
+        paintable_sink: Option<gst::Element>,
         decoder_name: Option<String>,
         rendered: Arc<AtomicU64>,
         /// Decoders demoted after failing here, for `describe`.
@@ -239,12 +241,13 @@ pub mod gst_out {
                 );
             }
             let rendered = Arc::new(AtomicU64::new(0));
-            let (desc, pipeline, appsrc) = Self::build(cfg, &rendered)?;
+            let (desc, pipeline, appsrc, paintable_sink) = Self::build(cfg, &rendered)?;
             Ok(Self {
                 cfg: cfg.clone(),
                 desc,
                 pipeline,
                 appsrc,
+                paintable_sink,
                 decoder_name: None,
                 rendered,
                 demoted: Vec::new(),
@@ -262,7 +265,7 @@ pub mod gst_out {
         fn build(
             cfg: &VideoConfig,
             rendered: &Arc<AtomicU64>,
-        ) -> Result<(String, gst::Pipeline, gst_app::AppSrc)> {
+        ) -> Result<(String, gst::Pipeline, gst_app::AppSrc, Option<gst::Element>)> {
             let desc = launch_description(cfg);
             let pipeline = gst::parse::launch(&desc)
                 .with_context(|| format!("building pipeline: {desc}"))?
@@ -273,6 +276,8 @@ pub mod gst_out {
                 .context("appsrc missing")?
                 .downcast::<gst_app::AppSrc>()
                 .map_err(|_| anyhow!("src is not an appsrc"))?;
+            #[allow(unused_mut)]
+            let mut paintable_sink = pipeline.by_name("gtksink");
             #[cfg(feature = "gtk")]
             if cfg.sink == SinkKind::Gtk && cfg.gl {
                 let sink = gst::ElementFactory::make("gtk4paintablesink")
@@ -283,6 +288,7 @@ pub mod gst_out {
                     .by_name("glsink")
                     .context("glsinkbin missing")?
                     .set_property("sink", &sink);
+                paintable_sink = Some(sink);
             }
             let counter = rendered.clone();
             let probe_pad = pipeline
@@ -297,7 +303,7 @@ pub mod gst_out {
                 .set_state(gst::State::Playing)
                 .context("starting pipeline")?;
             info!("pipeline: {desc}");
-            Ok((desc, pipeline, appsrc))
+            Ok((desc, pipeline, appsrc, paintable_sink))
         }
 
         /// Throw the pipeline away and build it again: decodebin3 keeps its
@@ -305,10 +311,11 @@ pub mod gst_out {
         /// created with, so only a new one plugs a different decoder.
         fn recreate(&mut self) -> Result<()> {
             let _ = self.pipeline.set_state(gst::State::Null);
-            let (desc, pipeline, appsrc) = Self::build(&self.cfg, &self.rendered)?;
+            let (desc, pipeline, appsrc, paintable_sink) = Self::build(&self.cfg, &self.rendered)?;
             self.desc = desc;
             self.pipeline = pipeline;
             self.appsrc = appsrc;
+            self.paintable_sink = paintable_sink;
             self.decoder_name = None;
             self.generation += 1;
             Ok(())
@@ -321,13 +328,7 @@ pub mod gst_out {
 
         /// The `gtk4paintablesink`, whose `paintable` the window shows.
         pub fn paintable_sink(&self) -> Option<gst::Element> {
-            let mut it = self.pipeline.iterate_recurse();
-            while let Ok(Some(el)) = it.next() {
-                if el.name() == "gtksink" {
-                    return Some(el);
-                }
-            }
-            None
+            self.paintable_sink.clone()
         }
 
         fn rebuild(&mut self) -> Result<()> {

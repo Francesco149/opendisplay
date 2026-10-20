@@ -181,6 +181,7 @@ impl Receiver {
                 }
                 Some(ev) = recv_input(&mut self.input) => {
                     if !sess.is_connected() {
+                        debug!("input while no sender is connected: {ev:?}");
                         continue;
                     }
                     report.input_events += 1;
@@ -194,6 +195,7 @@ impl Receiver {
                         }),
                         UserInput::Scroll { dx, dy } => ControlMessage::Scroll(Scroll { dx, dy }),
                     };
+                    debug!("input {msg:?}");
                     vec![sess.control(&msg)]
                 }
                 dgram = recv_udp(&self.udp, &mut udp_buf) => {

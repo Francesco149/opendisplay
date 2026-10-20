@@ -273,6 +273,10 @@ fn attach_input(picture: &gtk::Picture, tx: UnboundedSender<UserInput>) {
     let motion = gtk::EventControllerMotion::new();
     let t = touch.clone();
     motion.connect_motion(move |_, x, y| t(TouchPhase::Moved, x, y));
+    // Entering the window is a position too (and the only one GTK reports
+    // when the pointer appears over it, e.g. a seat gaining a pointer).
+    let t = touch.clone();
+    motion.connect_enter(move |_, x, y| t(TouchPhase::Moved, x, y));
     picture.add_controller(motion);
 
     let click = gtk::GestureClick::new();
