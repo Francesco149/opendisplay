@@ -80,7 +80,8 @@ pub enum Dev {
     /// Follow the pointer cursor of an existing output through the
     /// ext-image-copy-capture cursor session (the cursor side channel's
     /// source) and log what would be sent: position, enter/leave, sprite.
-    /// Creates nothing.
+    /// Creates nothing. On Hyprland <= 0.56.2, do not remove or disable the
+    /// output while it runs: a pending cursor frame then crashes Hyprland.
     CursorTest {
         /// wl_output name, e.g. eDP-1 or an od-… output.
         #[arg(long)]

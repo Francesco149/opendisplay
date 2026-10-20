@@ -664,6 +664,8 @@ impl Drop for CursorThread {
 
 /// Consecutive failed sprite frames before the sprite is given up.
 const MAX_SPRITE_FAILURES: u32 = 5;
+/// Empty copies taken with the pointer over the output before giving up.
+const MAX_EMPTY_REFRESHES: u32 = 3;
 /// Cursor sessions reopened to fetch a current sprite, at most this often.
 const REOPEN_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -814,6 +816,9 @@ fn run(
     // one only when the cursor image changes).
     let mut stale = false;
     let mut last_open = Instant::now();
+    // Fresh sessions that still gave no image while the pointer was over
+    // the output: past a few, the compositor cannot deliver one.
+    let mut empty_refreshes = 0u32;
     let mut seen_constraints = None;
     let mut wait = Duration::from_millis(100);
     while !stop.load(Ordering::Relaxed) && !st.stopped {
@@ -913,9 +918,25 @@ fn run(
                 let send = match kind {
                     SpriteKind::Cursor => true,
                     // A hidden cursor is news only to a receiver drawing one.
-                    SpriteKind::Clear => have_sprite,
-                    SpriteKind::Placeholder => {
-                        stale = true;
+                    SpriteKind::Clear if have_sprite => true,
+                    SpriteKind::Clear | SpriteKind::Placeholder => {
+                        // No image yet. With the pointer over the output a
+                        // fresh session should have copied one; a compositor
+                        // whose copies stay empty cannot (Hyprland 0.56.2).
+                        if positions.inside() && !have_sprite {
+                            empty_refreshes += 1;
+                        }
+                        if empty_refreshes > MAX_EMPTY_REFRESHES && !sprite_failed {
+                            sprite_failed = true;
+                            give_up(
+                                format!(
+                                    "{empty_refreshes} cursor copies over the output were empty"
+                                ),
+                                &mut sink,
+                            );
+                        } else {
+                            stale = true;
+                        }
                         false
                     }
                 };
