@@ -122,7 +122,12 @@ jobs:
         working-directory: linux/packaging/arch/opendisplay-sender
         run: |
           pacman -U --noconfirm opendisplay-sender-[0-9]*.pkg.tar.*
-          pacman -S --noconfirm --needed sway foot wlr-randr jq
+          pacman -S --noconfirm --needed sway foot wlr-randr jq libcap
+          # Executing /usr/bin/sway in this container failed with "Operation
+          # not permitted" (#298): a file capability outside Docker's default
+          # set. A plain copy carries none; the smoke step puts it first.
+          getcap /usr/bin/sway || true
+          install -m755 /usr/bin/sway /usr/local/bin/sway
 
       # The far end for the streaming step: no GStreamer needed for --sink
       # none. Cargo is still installed from makepkg's makedepends.
@@ -134,7 +139,7 @@ jobs:
       - name: Sway headless smoke
         run: |
           install -d -o builder "$RUNNER_TEMP/sway-smoke"
-          sudo -u builder -H env LANG=C.UTF-8 \
+          sudo -u builder -H env LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin \
             OD_RECEIVER="$GITHUB_WORKSPACE/linux/target/release/od-receiver" \
             timeout 180 linux/testbench/sway-smoke.sh /usr/bin/od-sender "$RUNNER_TEMP/sway-smoke"
 
