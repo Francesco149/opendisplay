@@ -149,11 +149,29 @@ jobs:
             OD_RECEIVER="$GITHUB_WORKSPACE/linux/target/release/od-receiver" \
             timeout 180 linux/testbench/sway-smoke.sh /usr/bin/od-sender "$RUNNER_TEMP/sway-smoke"
 
+      # The receiver presenting for real: GTK window, GStreamer decode, the
+      # packaged sender streaming into it on the same headless Sway, input
+      # back (linux/testbench/receiver-smoke.sh).
+      - name: Build od-receiver (GTK)
+        run: |
+          pacman -S --noconfirm --needed gtk4 gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav
+          sudo -u builder -H cargo build --locked --release \
+            --manifest-path linux/Cargo.toml -p od-receiver
+
+      - name: Receiver smoke
+        run: |
+          install -d -o builder "$RUNNER_TEMP/receiver-smoke"
+          sudo -u builder -H env LANG=C.UTF-8 PATH=/usr/local/bin:/usr/bin \
+            timeout 180 linux/testbench/receiver-smoke.sh /usr/bin/od-sender \
+            "$GITHUB_WORKSPACE/linux/target/release/od-receiver" "$RUNNER_TEMP/receiver-smoke"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: sway-smoke-logs
-          path: ${{ runner.temp }}/sway-smoke
+          path: |
+            ${{ runner.temp }}/sway-smoke
+            ${{ runner.temp }}/receiver-smoke
           if-no-files-found: ignore
 
   # The KDE backend on a headless KWin (SENDER-PLAN §4.3 KWin row):
