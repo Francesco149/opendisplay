@@ -495,8 +495,8 @@ future wlroots backend):
   shift the other outputs right/down in the same configuration, as KDE's
   display settings do; on close the remaining outputs move back so the
   layout starts at 0,0 again (KWin itself leaves them shifted). All five
-  `--position` forms *verified*; a `kill -9` cannot restore, the next
-  placement re-normalises.
+  `--position` forms *verified*; after a `kill -9` KWin restores the
+  layout itself (§8.17).
 * PipeWire: the consumer must offer the output size as the preferred
   `VideoSize`, or KWin resamples (it negotiated 1920x1080 for 800x600).
   memfd/shm buffers when no modifiers are offered; BGRx.
@@ -843,7 +843,11 @@ What that means for `od-sender`, in priority order:
 17. **KDE `auto-left`/`auto-up` move the user's outputs.** KWin refuses
     negative positions, so the new output goes to 0,0 and the other outputs
     shift right/down in the same configuration, as KDE's display settings
-    do; the sender moves them back when it closes. After a `kill -9` they
-    stay shifted until the next placement re-normalises the layout.
-    *Recommend* `auto-right`/`auto-down` as the KDE default in docs, and a
-    `clean` step on KDE that re-normalises.
+    do; the sender moves them back when it closes. **Resolved:** after a
+    `kill -9`, KWin 6.8 itself moves them back within 0.3 s (*verified* on
+    the headless bench: it restores the layout when the client dies); a
+    starting sender also re-normalises any offset (`normalize` now shifts
+    back from positive offsets too), and `od-sender clean` on KDE moves the
+    layout to 0,0 when no sender holds a lock. That last path is a safety
+    net for other KWin versions; it could not be staged live, since KWin and
+    kscreen-doctor normalise a lone offset output to 0,0 themselves.
