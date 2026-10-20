@@ -297,7 +297,10 @@ impl SenderSession {
                     self.udp_started = None;
                     self.udp_acked = false;
                 }
-                self.cursor_seq = 0;
+                // No cursor_seq reset here: the sequence is per TCP session
+                // (§6.3) and receivers keep their `s > last` floor across a
+                // re-sent hello (rotation, `addrs` change); restarting at 1
+                // would freeze the cursor until it passed the old mark.
                 self.hello = Some(h.clone());
                 out.push(SenderAction::Hello(h));
                 out.push(self.control(&ControlMessage::Welcome(Welcome {

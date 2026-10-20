@@ -321,6 +321,53 @@ fn cursor_over_tcp_dedupes_by_sequence() {
 }
 
 #[test]
+fn cursor_sequence_survives_a_rehello() {
+    // §6.3: the sequence restarts only on a new connection. A receiver that
+    // re-sends hello (rotation) keeps its floor, so the sender must not
+    // restart at 1 or every cursor is dropped as stale.
+    let mut h = Harness::new(hello());
+    h.connect();
+    let now = h.tx_now();
+    for i in 0..5 {
+        let s = h.tx.cursor(now, 0.1 * i as f64, 0.5, true);
+        assert_eq!(h.deliver_to_receiver(&s).len(), 1);
+    }
+    let r = h.rx.update_hello(Hello {
+        pixels_wide: 1600,
+        pixels_high: 2560,
+        ..hello()
+    });
+    let s = h.deliver_to_sender(&r);
+    h.deliver_to_receiver(&s);
+    let now = h.tx_now();
+    let s = h.tx.cursor(now, 0.9, 0.1, true);
+    assert_eq!(
+        h.deliver_to_receiver(&s),
+        vec![ReceiverAction::Cursor {
+            x: Some(0.9),
+            y: Some(0.1),
+            visible: true
+        }],
+        "cursor after the re-hello must be applied"
+    );
+}
+
+#[test]
+fn cursor_sequence_restarts_on_reconnect() {
+    let mut h = Harness::new(hello());
+    h.connect();
+    let now = h.tx_now();
+    for _ in 0..3 {
+        h.tx.cursor(now, 0.5, 0.5, true);
+    }
+    // A fresh connection on both ends: the receiver's floor resets too.
+    h.connect();
+    let now = h.tx_now();
+    let s = h.tx.cursor(now, 0.2, 0.2, true);
+    assert_eq!(h.deliver_to_receiver(&s).len(), 1);
+}
+
+#[test]
 fn cursor_udp_side_channel_acks_then_leaves_tcp() {
     let mut h = Harness::new(Hello {
         cursor_port: Some(9001),
