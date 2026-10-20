@@ -39,13 +39,43 @@ pub const MAX_PNG_BYTES: usize = 24_000;
 // ---------------------------------------------------------------------------
 // Sprite encoding: premultiplied BGRA (wl_shm ARGB8888) -> PNG -> base64.
 
-/// Straight-alpha RGBA from little-endian premultiplied ARGB8888 (B, G, R, A).
-pub fn bgra_premul_to_rgba(bgra: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
+/// Byte order of a 32-bit sprite in memory (wl_shm formats are named
+/// little-endian: ARGB8888 is B, G, R, A in memory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteOrder {
+    /// ARGB8888.
+    Bgra,
+    /// ABGR8888.
+    Rgba,
+}
+
+impl SpriteOrder {
+    /// The shm formats a sprite can come in: they need alpha.
+    pub fn of(f: wl_shm::Format) -> Option<Self> {
+        match f {
+            wl_shm::Format::Argb8888 => Some(SpriteOrder::Bgra),
+            wl_shm::Format::Abgr8888 => Some(SpriteOrder::Rgba),
+            _ => None,
+        }
+    }
+}
+
+/// Straight-alpha RGBA from a premultiplied 32-bit sprite.
+pub fn premul_to_rgba(
+    px: &[u8],
+    order: SpriteOrder,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height as usize {
-        let row = &bgra[y * stride as usize..][..width as usize * 4];
+        let row = &px[y * stride as usize..][..width as usize * 4];
         for px in row.chunks_exact(4) {
-            let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+            let (r, g, b, a) = match order {
+                SpriteOrder::Bgra => (px[2], px[1], px[0], px[3]),
+                SpriteOrder::Rgba => (px[0], px[1], px[2], px[3]),
+            };
             let un = |c: u8| {
                 if a == 0 {
                     0
@@ -162,14 +192,56 @@ pub fn base64(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Position: the hotspot in output pixels -> normalized, rate-limited updates.
+// Coordinates.
+
+/// The units a compositor's cursor session reports in, for one output.
+///
+/// The protocol says `position` is in the output buffer's pixels and
+/// `hotspot` in the sprite buffer's. Hyprland 0.56.2 instead sends both in
+/// logical (layout) units, and renders the sprite at the highest monitor
+/// scale (`CImageCopyCaptureCursorSession::sendCursorEvents`,
+/// `CCursorManager`), so a backend says which applies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorSpace {
+    /// The output's size in the units of `position`.
+    pub width: f64,
+    pub height: f64,
+    /// Sprite buffer pixels per `position`/`hotspot` unit.
+    pub sprite_scale: f64,
+}
+
+impl CursorSpace {
+    /// As the protocol specifies: everything in buffer pixels.
+    pub fn pixels(width: u32, height: u32) -> Self {
+        Self {
+            width: width.max(1) as f64,
+            height: height.max(1) as f64,
+            sprite_scale: 1.0,
+        }
+    }
+
+    /// `cursorImg` geometry for a `w`x`h` sprite with this hotspot:
+    /// (nw, nh, ax, ay), PROTOCOL §6.2 / §7.
+    pub fn sprite_geometry(&self, w: u32, h: u32, hotspot: (i32, i32)) -> (f64, f64, f64, f64) {
+        let lw = w.max(1) as f64 / self.sprite_scale;
+        let lh = h.max(1) as f64 / self.sprite_scale;
+        (
+            lw / self.width,
+            lh / self.height,
+            (hotspot.0 as f64 / lw).clamp(0.0, 1.0),
+            (hotspot.1 as f64 / lh).clamp(0.0, 1.0),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Position: the hotspot in output units -> normalized, rate-limited updates.
 
 /// Turns `enter`/`leave`/`position` into [`CursorEvent`]s: positions are
 /// normalized to the output, coalesced to [`MIN_MOVE_INTERVAL`], and
 /// repeated positions dropped.
 pub struct Positions {
-    width: f64,
-    height: f64,
+    space: CursorSpace,
     inside: bool,
     hidden_sent: bool,
     latest: Option<(i32, i32)>,
@@ -178,10 +250,9 @@ pub struct Positions {
 }
 
 impl Positions {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(space: CursorSpace) -> Self {
         Self {
-            width: width.max(1) as f64,
-            height: height.max(1) as f64,
+            space,
             inside: false,
             hidden_sent: false,
             latest: None,
@@ -229,8 +300,8 @@ impl Positions {
         self.hidden_sent = false;
         self.last_emit = Some(now);
         let ev = CursorEvent::Moved {
-            x: p.0 as f64 / self.width,
-            y: p.1 as f64 / self.height,
+            x: p.0 as f64 / self.space.width,
+            y: p.1 as f64 / self.space.height,
         };
         (Some(ev), None)
     }
@@ -300,6 +371,42 @@ impl Drop for ShmBuffer {
     }
 }
 
+/// A session's buffer constraints. Events arrive as a batch closed by
+/// `done` in any order (Hyprland: shm formats, dmabuf, then size), and a
+/// later batch replaces the earlier one.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Constraints {
+    pending_size: Option<(u32, u32)>,
+    pending_formats: Vec<WEnum<wl_shm::Format>>,
+    /// The committed batch.
+    pub size: (u32, u32),
+    pub formats: Vec<WEnum<wl_shm::Format>>,
+    pub known: bool,
+}
+
+impl Constraints {
+    pub fn size(&mut self, w: u32, h: u32) {
+        self.pending_size = Some((w, h));
+    }
+    pub fn shm_format(&mut self, f: WEnum<wl_shm::Format>) {
+        self.pending_formats.push(f);
+    }
+    pub fn done(&mut self) {
+        if let Some(s) = self.pending_size.take() {
+            self.size = s;
+        }
+        self.formats = std::mem::take(&mut self.pending_formats);
+        self.known = true;
+    }
+    /// A format a sprite can be read from.
+    pub fn sprite_format(&self) -> Option<(wl_shm::Format, SpriteOrder)> {
+        self.formats.iter().find_map(|f| match f {
+            WEnum::Value(f) => SpriteOrder::of(*f).map(|o| (*f, o)),
+            WEnum::Unknown(_) => None,
+        })
+    }
+}
+
 #[derive(Default)]
 struct State {
     shm: Option<wl_shm::WlShm>,
@@ -308,10 +415,8 @@ struct State {
     source_mgr:
         Option<ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1>,
     capture_mgr: Option<ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1>,
-    // Image session constraints.
-    size: (u32, u32),
-    formats: Vec<wl_shm::Format>,
-    constraints_done: bool,
+    // Image session constraints: collected until `done`, which commits them.
+    constraints: Constraints,
     stopped: bool,
     // Cursor session.
     entered: Option<bool>,
@@ -386,14 +491,9 @@ impl Dispatch<ext_image_copy_capture_session_v1::ExtImageCopyCaptureSessionV1, (
     ) {
         use ext_image_copy_capture_session_v1::Event;
         match event {
-            Event::BufferSize { width, height } => {
-                st.size = (width, height);
-                st.formats.clear();
-            }
-            Event::ShmFormat {
-                format: WEnum::Value(f),
-            } => st.formats.push(f),
-            Event::Done => st.constraints_done = true,
+            Event::BufferSize { width, height } => st.constraints.size(width, height),
+            Event::ShmFormat { format } => st.constraints.shm_format(format),
+            Event::Done => st.constraints.done(),
             Event::Stopped => st.stopped = true,
             _ => {}
         }
@@ -466,9 +566,10 @@ pub struct CursorThread {
 }
 
 impl CursorThread {
-    /// Start delivering the cursor of output `name`, `width`x`height` pixels.
-    /// Returns once the cursor session exists, or with the reason it cannot.
-    pub fn spawn(name: &str, width: u32, height: u32, sink: CursorSink) -> Result<Self> {
+    /// Start delivering the cursor of output `name`, whose cursor session
+    /// reports in `space`. Returns once the cursor session exists, or with
+    /// the reason it cannot.
+    pub fn spawn(name: &str, space: CursorSpace, sink: CursorSink) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let name = name.to_string();
@@ -477,7 +578,7 @@ impl CursorThread {
             .name("cursor".into())
             .spawn(move || {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&name, width, height, sink, &thread_stop, &ready_tx)
+                    run(&name, space, sink, &thread_stop, &ready_tx)
                 }));
                 match r {
                     Ok(Ok(())) => {}
@@ -521,17 +622,12 @@ impl Drop for CursorThread {
     }
 }
 
-fn pick_format(formats: &[wl_shm::Format]) -> Option<wl_shm::Format> {
-    // The sprite needs alpha; ARGB8888 is what every compositor offers.
-    [wl_shm::Format::Argb8888]
-        .into_iter()
-        .find(|f| formats.contains(f))
-}
+/// Consecutive failed sprite frames before the sprite is given up.
+const MAX_SPRITE_FAILURES: u32 = 5;
 
 fn run(
     name: &str,
-    width: u32,
-    height: u32,
+    space: CursorSpace,
     mut sink: CursorSink,
     stop: &AtomicBool,
     ready: &std::sync::mpsc::Sender<Result<()>>,
@@ -569,10 +665,17 @@ fn run(
         bail!("the compositor refused the cursor session");
     }
     let _ = ready.send(Ok(()));
-    info!("cursor of {name} goes to the side channel");
+    debug!("cursor session for {name} open; the video keeps its cursor until the first sprite");
 
-    let mut positions = Positions::new(width, height);
-    let mut buffer: Option<ShmBuffer> = None;
+    let mut positions = Positions::new(space);
+    let mut buffer: Option<(ShmBuffer, SpriteOrder)> = None;
+    // Set once the sprite is given up; positions keep flowing.
+    let mut sprite_failed = false;
+    let mut failures = 0u32;
+    let give_up = |why: String, sink: &mut CursorSink| {
+        debug!("cursor sprite unavailable: {why}");
+        sink(CursorEvent::SpriteUnavailable(why));
+    };
     let mut frame: Option<ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1> = None;
     let mut hotspot = (0, 0);
     let mut last_sprite: Option<(Vec<u8>, (i32, i32))> = None;
@@ -599,21 +702,29 @@ fn run(
 
         // The sprite: capture a frame whenever the constraints are known; the
         // compositor completes it when the cursor image changes.
-        if st.constraints_done && st.size.0 > 0 && st.size.1 > 0 {
+        let c = &st.constraints;
+        if !sprite_failed && c.known && c.size.0 > 0 && c.size.1 > 0 {
             let fits = buffer
                 .as_ref()
-                .is_some_and(|b| (b.width, b.height) == st.size);
+                .is_some_and(|(b, _)| (b.width, b.height) == c.size);
             if !fits {
                 if let Some(f) = frame.take() {
                     f.destroy();
                 }
-                buffer = match pick_format(&st.formats) {
-                    Some(fmt) => Some(ShmBuffer::new(&shm, &qh, st.size.0, st.size.1, fmt)?),
-                    None => {
-                        warn!("cursor session offers no ARGB8888; no sprite");
-                        None
+                buffer = None;
+                match c.sprite_format() {
+                    Some((fmt, order)) => {
+                        debug!("cursor sprite buffer {}x{} {fmt:?}", c.size.0, c.size.1);
+                        buffer = Some((ShmBuffer::new(&shm, &qh, c.size.0, c.size.1, fmt)?, order));
                     }
-                };
+                    None => {
+                        sprite_failed = true;
+                        give_up(
+                            format!("no 32-bit alpha shm format among {:?}", c.formats),
+                            &mut sink,
+                        );
+                    }
+                }
             }
         }
         if st.ready {
@@ -624,11 +735,12 @@ fn run(
             if let Some(h) = st.hotspot_pending.take() {
                 hotspot = h;
             }
-            if let Some(b) = &buffer {
+            failures = 0;
+            if let Some((b, order)) = &buffer {
                 let mut px = vec![0u8; (b.stride * b.height) as usize];
                 b.file.read_exact_at(&mut px, 0)?;
                 if last_sprite.as_ref() != Some(&(px.clone(), hotspot)) {
-                    let rgba = bgra_premul_to_rgba(&px, b.width, b.height, b.stride);
+                    let rgba = premul_to_rgba(&px, *order, b.width, b.height, b.stride);
                     let png = sprite_png(rgba, b.width, b.height);
                     debug!(
                         "cursor sprite {}x{} hotspot {hotspot:?}: {} bytes PNG",
@@ -636,12 +748,13 @@ fn run(
                         b.height,
                         png.len()
                     );
+                    let (nw, nh, ax, ay) = space.sprite_geometry(b.width, b.height, hotspot);
                     sink(CursorEvent::Image {
                         png,
-                        nw: b.width as f64 / width.max(1) as f64,
-                        nh: b.height as f64 / height.max(1) as f64,
-                        ax: hotspot.0 as f64 / b.width as f64,
-                        ay: hotspot.1 as f64 / b.height as f64,
+                        nw,
+                        nh,
+                        ax,
+                        ay,
                     });
                     last_sprite = Some((px, hotspot));
                 }
@@ -655,11 +768,22 @@ fn run(
                 WEnum::Value(ext_image_copy_capture_frame_v1::FailureReason::BufferConstraints) => {
                     buffer = None;
                 }
-                _ => debug!("cursor frame failed: {reason:?}"),
+                _ => {
+                    failures += 1;
+                    debug!("cursor frame failed: {reason:?}");
+                    if failures >= MAX_SPRITE_FAILURES && !sprite_failed {
+                        sprite_failed = true;
+                        buffer = None;
+                        give_up(
+                            format!("{failures} sprite captures failed ({reason:?})"),
+                            &mut sink,
+                        );
+                    }
+                }
             }
         }
-        if frame.is_none() {
-            if let Some(b) = &buffer {
+        if frame.is_none() && !sprite_failed {
+            if let Some((b, _)) = &buffer {
                 let f = session.create_frame(&qh, ());
                 f.attach_buffer(&b.buffer);
                 f.damage_buffer(0, 0, b.width as i32, b.height as i32);
@@ -745,8 +869,14 @@ mod tests {
     fn premultiplied_bgra_becomes_straight_rgba() {
         // Opaque red, half-transparent white (premultiplied 128), transparent.
         let bgra = [0, 0, 255, 255, 128, 128, 128, 128, 0, 0, 0, 0, 9, 9, 9, 9];
-        let rgba = bgra_premul_to_rgba(&bgra, 3, 1, 16);
+        let rgba = premul_to_rgba(&bgra, SpriteOrder::Bgra, 3, 1, 16);
         assert_eq!(rgba, [255, 0, 0, 255, 255, 255, 255, 128, 0, 0, 0, 0]);
+        // ABGR8888: R, G, B, A in memory.
+        let abgr = [255, 0, 0, 255];
+        assert_eq!(
+            premul_to_rgba(&abgr, SpriteOrder::Rgba, 1, 1, 4),
+            [255, 0, 0, 255]
+        );
     }
 
     #[test]
@@ -785,6 +915,82 @@ mod tests {
         assert_eq!(crc32(&[b"IEND"]), 0xae42_6082);
     }
 
+    /// Hyprland reports logical units: an output of 1280x800 pixels at
+    /// scale 2 is 640x400 to the cursor session (the nested-run bug: 0.1
+    /// came back as 0.05), at 1.5 853.3x533.3.
+    #[test]
+    fn positions_normalize_in_the_sessions_units() {
+        let t = Instant::now();
+        for (scale, at, expect) in [
+            (1.0, (128, 80), (0.1, 0.1)),
+            (2.0, (64, 40), (0.1, 0.1)),
+            (2.0, (192, 160), (0.3, 0.4)),
+            (1.5, (512, 373), (0.6, 0.7)),
+        ] {
+            let space = CursorSpace {
+                width: 1280.0 / scale,
+                height: 800.0 / scale,
+                sprite_scale: scale,
+            };
+            let mut p = Positions::new(space);
+            p.enter();
+            p.position(at.0, at.1);
+            let Some(CursorEvent::Moved { x, y }) = p.poll(t).0 else {
+                panic!("no move")
+            };
+            assert!(
+                (x - expect.0).abs() < 0.002 && (y - expect.1).abs() < 0.002,
+                "{scale}: {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn sprite_geometry_accounts_for_the_cursor_scale() {
+        // Hyprland, highest monitor scale 2: a 24-unit cursor is a 48 px
+        // sprite with a logical hotspot (4, 2) on a 640x400 logical output.
+        let space = CursorSpace {
+            width: 640.0,
+            height: 400.0,
+            sprite_scale: 2.0,
+        };
+        let (nw, nh, ax, ay) = space.sprite_geometry(48, 48, (4, 2));
+        assert_eq!((nw, nh), (24.0 / 640.0, 24.0 / 400.0));
+        assert_eq!((ax, ay), (4.0 / 24.0, 2.0 / 24.0));
+        // Per the protocol: everything in pixels.
+        let (nw, _, ax, _) = CursorSpace::pixels(1920, 1080).sprite_geometry(32, 32, (8, 8));
+        assert_eq!((nw, ax), (32.0 / 1920.0, 0.25));
+    }
+
+    /// Hyprland 0.56.2 sends shm_format, dmabuf_*, buffer_size, done; the
+    /// first version cleared the formats on buffer_size.
+    #[test]
+    fn constraints_commit_on_done_in_any_order() {
+        let mut c = Constraints::default();
+        c.shm_format(WEnum::Value(wl_shm::Format::Argb8888));
+        c.size(48, 48);
+        assert!(!c.known);
+        c.done();
+        assert_eq!(c.size, (48, 48));
+        assert_eq!(
+            c.sprite_format(),
+            Some((wl_shm::Format::Argb8888, SpriteOrder::Bgra))
+        );
+        // A new batch replaces the old one.
+        c.size(64, 64);
+        c.shm_format(WEnum::Unknown(0x3432_5241));
+        c.shm_format(WEnum::Value(wl_shm::Format::Abgr8888));
+        c.done();
+        assert_eq!(c.size, (64, 64));
+        assert_eq!(
+            c.sprite_format(),
+            Some((wl_shm::Format::Abgr8888, SpriteOrder::Rgba))
+        );
+        c.shm_format(WEnum::Value(wl_shm::Format::Xrgb8888));
+        c.done();
+        assert_eq!(c.sprite_format(), None, "no alpha, no sprite");
+    }
+
     #[test]
     fn big_noisy_sprites_shrink_under_the_limit() {
         let (w, h) = (256u32, 256u32);
@@ -813,7 +1019,7 @@ mod tests {
     #[test]
     fn positions_normalize_coalesce_and_hide() {
         let t = Instant::now();
-        let mut p = Positions::new(2000, 1000);
+        let mut p = Positions::new(CursorSpace::pixels(2000, 1000));
         // Starts hidden, says so once.
         assert_eq!(p.poll(t).0, Some(CursorEvent::Hidden));
         assert_eq!(p.poll(t).0, None);

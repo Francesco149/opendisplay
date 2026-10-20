@@ -353,6 +353,47 @@ struct Active {
     display: Box<dyn VirtualDisplay>,
     pipe: EncodePipeline,
     target: Target,
+    cursor: CursorSide,
+    /// The newest position while `Pending`, sent once the channel is live.
+    held_position: Option<(f64, f64)>,
+}
+
+/// The cursor side channel for one display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorSide {
+    /// Not used: the cursor is painted (or off).
+    Off,
+    /// Cursor session running, still painting until the first sprite: a
+    /// receiver must never be left with no cursor at all.
+    Pending,
+    /// Sprite sent, frames without the cursor, positions forwarded.
+    Live,
+    /// Gave up (no sprite): painting again for this display.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorAction {
+    Ignore,
+    /// Pending: remember the position for when the channel goes live.
+    Hold,
+    Forward,
+    /// First sprite: stop painting, send the sprite and the held position.
+    GoLive,
+    /// No sprite: paint again; hide the receiver's cursor if it was live.
+    Fail,
+}
+
+fn cursor_step(side: CursorSide, ev: &CursorEvent) -> (CursorSide, CursorAction) {
+    use CursorAction::*;
+    use CursorSide::*;
+    match (side, ev) {
+        (Off | Failed, _) => (side, Ignore),
+        (Pending | Live, CursorEvent::SpriteUnavailable(_)) => (Failed, Fail),
+        (Pending, CursorEvent::Image { .. }) => (Live, GoLive),
+        (Pending, _) => (Pending, Hold),
+        (Live, _) => (Live, Forward),
+    }
 }
 
 impl Active {
@@ -390,6 +431,7 @@ fn build(
             mut display,
             pipe,
             target: old,
+            ..
         }) => {
             drop(input);
             display.stop_capture();
@@ -412,15 +454,17 @@ fn build(
         max_fps: target.plan.stream.fps as f32,
         threads: opts.threads,
     })?;
-    let mut painted = opts.cursor != CursorMode::Off;
+    // Painted until the side channel has delivered its first sprite.
+    let painted = opts.cursor != CursorMode::Off;
+    let mut side = CursorSide::Off;
     if let Some(tx) = cursor {
         let tx = tx.clone();
         match display.start_cursor(Box::new(move |ev| {
             let _ = tx.send(ev);
         })) {
-            Ok(()) => painted = false,
+            Ok(()) => side = CursorSide::Pending,
             Err(e) => {
-                warn!("cursor side channel unavailable ({e:#}); painting the cursor into the video")
+                debug!("cursor side channel unavailable ({e:#}); the cursor stays in the video")
             }
         }
     }
@@ -438,6 +482,8 @@ fn build(
         display,
         pipe,
         target,
+        cursor: side,
+        held_position: None,
     });
     Ok(stream)
 }
@@ -691,6 +737,30 @@ async fn send_stream_config<S: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// A cursor event as the messages for the receiver.
+fn cursor_out(sess: &mut SenderSession, now: Now, ev: CursorEvent) -> Vec<SenderAction> {
+    match ev {
+        CursorEvent::Moved { x, y } => sess.cursor(now, x, y, true),
+        CursorEvent::Hidden => sess.cursor(now, 0.0, 0.0, false),
+        CursorEvent::Image {
+            png,
+            nw,
+            nh,
+            ax,
+            ay,
+        } => {
+            vec![sess.cursor_image(CursorImg {
+                nw,
+                nh,
+                ax,
+                ay,
+                png: base64(&png),
+            })]
+        }
+        CursorEvent::SpriteUnavailable(_) => vec![],
+    }
+}
+
 async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at.into()).await,
@@ -726,6 +796,8 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     // Cursor events from the display's cursor thread, and the UDP socket for
     // the side channel (bound on the first datagram).
     let (cursor_tx, mut cursor_rx) = mpsc::unbounded_channel::<CursorEvent>();
+    // One warning per session when the side channel cannot be used.
+    let mut cursor_warned = false;
     let mut udp: Option<tokio::net::UdpSocket> = None;
     let cursor_for = |opts: &RunOptions, backend: &dyn Backend, sess: &SenderSession| {
         let offers = sess.hello().is_some_and(|h| h.cursor_port.is_some());
@@ -788,13 +860,52 @@ async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                         vec![]
                     }
                 },
-                Some(ev) = cursor_rx.recv() => match ev {
-                    CursorEvent::Moved { x, y } => sess.cursor(now(start), x, y, true),
-                    CursorEvent::Hidden => sess.cursor(now(start), 0.0, 0.0, false),
-                    CursorEvent::Image { png, nw, nh, ax, ay } => {
-                        vec![sess.cursor_image(CursorImg { nw, nh, ax, ay, png: base64(&png) })]
+                Some(ev) = cursor_rx.recv() => {
+                    let Some(a) = active.as_mut() else { continue };
+                    let (next, action) = cursor_step(a.cursor, &ev);
+                    a.cursor = next;
+                    let mut out = Vec::new();
+                    match action {
+                        CursorAction::Ignore => {}
+                        CursorAction::Hold => {
+                            a.held_position = match ev {
+                                CursorEvent::Moved { x, y } => Some((x, y)),
+                                _ => None,
+                            };
+                        }
+                        CursorAction::GoLive => match a.display.set_cursor_painted(false) {
+                            Ok(()) => {
+                                info!("cursor: side channel live, video without the cursor");
+                                out.extend(cursor_out(&mut sess, now(start), ev));
+                                if let Some((x, y)) = a.held_position.take() {
+                                    out.extend(sess.cursor(now(start), x, y, true));
+                                }
+                            }
+                            Err(e) => {
+                                a.cursor = CursorSide::Failed;
+                                if !cursor_warned {
+                                    cursor_warned = true;
+                                    warn!("cursor side channel unusable ({e:#}); the cursor stays in the video");
+                                }
+                            }
+                        },
+                        CursorAction::Forward => out.extend(cursor_out(&mut sess, now(start), ev)),
+                        CursorAction::Fail => {
+                            if let Err(e) = a.display.set_cursor_painted(true) {
+                                warn!("painting the cursor again: {e:#}");
+                            }
+                            // The receiver may be drawing it: hide it there.
+                            out.extend(sess.cursor(now(start), 0.0, 0.0, false));
+                            if !cursor_warned {
+                                cursor_warned = true;
+                                if let CursorEvent::SpriteUnavailable(why) = &ev {
+                                    warn!("cursor side channel off ({why}); the cursor stays in the video");
+                                }
+                            }
+                        }
                     }
-                },
+                    out
+                }
                 _ = sleep_until_opt(debounce.deadline()) => {
                     if let Some(t) = debounce.poll(Instant::now()) {
                         let cur = cursor_for(&ropts, backend, &sess);
@@ -1078,9 +1189,18 @@ mod tests {
             *self.0.cursor_sink.lock().unwrap() = Some(sink);
             Ok(())
         }
+        fn set_cursor_painted(&mut self, painted: bool) -> Result<()> {
+            *self.0.painted.lock().unwrap() = Some(painted);
+            self.0.log(format!("set_cursor_painted {painted}"));
+            Ok(())
+        }
         fn start_capture(&mut self, o: CaptureOptions, sink: FrameSink) -> Result<()> {
             *self.0.painted.lock().unwrap() = Some(o.cursor);
-            self.0.log("start_capture");
+            if self.0.cursor_sink.lock().unwrap().is_some() {
+                self.0.log(format!("start_capture painted={}", o.cursor));
+            } else {
+                self.0.log("start_capture");
+            }
             *self.0.sink.lock().unwrap() = Some(sink);
             Ok(())
         }
@@ -1373,12 +1493,12 @@ mod tests {
         assert!(!cursor_separately(CursorMode::Off, true, true));
     }
 
-    /// A receiver offering `cursorPort` gets the cursor as `cursor` and
-    /// `cursorImg` messages (mirrored on TCP until a `cursorAck`), and the
-    /// video without a painted cursor.
-    #[tokio::test]
-    async fn the_cursor_rides_the_side_channel_when_offered() {
-        let (mut hello, name) = test_hello("cu");
+    /// A session with a receiver offering `cursorPort`: after its first
+    /// `streamConfig`, `events` come from the display's cursor thread. Returns
+    /// the receiver's cursor messages (cursor, cursorImg) in order, and the
+    /// fake's shared state.
+    async fn cursor_session(tag: &str, events: Vec<CursorEvent>) -> (Vec<ReceiverAction>, Shared) {
+        let (mut hello, name) = test_hello(tag);
         hello.cursor_port = Some(9001);
         let shared = Shared::default();
         let (sender_io, mut receiver_io) = tokio::io::duplex(1 << 16);
@@ -1405,35 +1525,38 @@ mod tests {
             }
         }
         let mut buf = vec![0u8; 1 << 16];
-        let (mut moved, mut sprite, mut pushed) = (None, None, false);
-        while moved.is_none() || sprite.is_none() {
-            let n = tokio::time::timeout(Duration::from_secs(5), receiver_io.read(&mut buf))
-                .await
-                .expect("sender went quiet")
-                .unwrap();
+        let mut seen = Vec::new();
+        let mut events = Some(events);
+        // Until the sender has been quiet for a moment after the events.
+        loop {
+            let wait = if events.is_some() { 5000 } else { 300 };
+            let Ok(r) =
+                tokio::time::timeout(Duration::from_millis(wait), receiver_io.read(&mut buf)).await
+            else {
+                assert!(events.is_none(), "sender went quiet before streamConfig");
+                break;
+            };
+            let n = r.unwrap();
             assert!(n > 0, "sender hung up");
             for a in rx.handle(rx_now(), ReceiverEvent::Bytes(&buf[..n])) {
                 match a {
-                    ReceiverAction::StreamConfig(_) if !pushed => {
-                        pushed = true;
-                        let mut sink = shared
-                            .cursor_sink
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .expect("cursor started");
-                        sink(CursorEvent::Image {
-                            png: b"PNG".to_vec(),
-                            nw: 0.02,
-                            nh: 0.04,
-                            ax: 0.25,
-                            ay: 0.5,
-                        });
-                        sink(CursorEvent::Moved { x: 0.5, y: 0.25 });
-                        *shared.cursor_sink.lock().unwrap() = Some(sink);
+                    ReceiverAction::StreamConfig(_) => {
+                        if let Some(evs) = events.take() {
+                            let mut sink = shared
+                                .cursor_sink
+                                .lock()
+                                .unwrap()
+                                .take()
+                                .expect("cursor started");
+                            for ev in evs {
+                                sink(ev);
+                            }
+                            *shared.cursor_sink.lock().unwrap() = Some(sink);
+                        }
                     }
-                    ReceiverAction::Cursor { x, y, visible } => moved = Some((x, y, visible)),
-                    ReceiverAction::CursorImage(img) => sprite = Some(img),
+                    a @ (ReceiverAction::Cursor { .. } | ReceiverAction::CursorImage(_)) => {
+                        seen.push(a)
+                    }
                     _ => {}
                 }
             }
@@ -1441,17 +1564,119 @@ mod tests {
         drop(receiver_io);
         task.await.unwrap().unwrap();
         forget_lock(&name);
-        assert_eq!(
-            *shared.painted.lock().unwrap(),
-            Some(false),
-            "no cursor in the video"
-        );
-        assert_eq!(moved, Some((Some(0.5), Some(0.25), true)));
-        let img = sprite.unwrap();
+        (seen, shared)
+    }
+
+    fn sprite() -> CursorEvent {
+        CursorEvent::Image {
+            png: b"PNG".to_vec(),
+            nw: 0.02,
+            nh: 0.04,
+            ax: 0.25,
+            ay: 0.5,
+        }
+    }
+
+    #[test]
+    fn the_cursor_goes_live_on_the_first_sprite_and_back_on_failure() {
+        use CursorAction::*;
+        use CursorSide::*;
+        let moved = CursorEvent::Moved { x: 0.1, y: 0.2 };
+        let fail = CursorEvent::SpriteUnavailable("x".into());
+        assert_eq!(cursor_step(Pending, &moved), (Pending, Hold));
+        assert_eq!(cursor_step(Pending, &CursorEvent::Hidden), (Pending, Hold));
+        assert_eq!(cursor_step(Pending, &sprite()), (Live, GoLive));
+        assert_eq!(cursor_step(Live, &moved), (Live, Forward));
+        assert_eq!(cursor_step(Live, &sprite()), (Live, Forward));
+        assert_eq!(cursor_step(Live, &fail), (Failed, Fail));
+        assert_eq!(cursor_step(Pending, &fail), (Failed, Fail));
+        assert_eq!(cursor_step(Failed, &sprite()), (Failed, Ignore));
+        assert_eq!(cursor_step(Off, &moved), (Off, Ignore));
+    }
+
+    /// The video keeps its cursor until the first sprite is out; positions
+    /// before that are held, and the newest one follows the sprite.
+    #[tokio::test]
+    async fn the_cursor_rides_the_side_channel_once_a_sprite_exists() {
+        let (seen, shared) = cursor_session(
+            "cu",
+            vec![
+                CursorEvent::Moved { x: 0.1, y: 0.1 },
+                CursorEvent::Moved { x: 0.5, y: 0.25 },
+                sprite(),
+                CursorEvent::Moved { x: 0.6, y: 0.3 },
+            ],
+        )
+        .await;
+        let ReceiverAction::CursorImage(img) = &seen[0] else {
+            panic!("sprite first: {seen:?}")
+        };
         assert_eq!((img.nw, img.nh, img.ax, img.ay), (0.02, 0.04, 0.25, 0.5));
         assert_eq!(img.png, base64(b"PNG"));
+        let cursor = |x: f64, y: f64| ReceiverAction::Cursor {
+            x: Some(x),
+            y: Some(y),
+            visible: true,
+        };
+        assert_eq!(&seen[1..], [cursor(0.5, 0.25), cursor(0.6, 0.3)]);
         let log = shared.entries();
-        assert_eq!(&log[1..3], ["start_cursor", "start_capture"]);
+        assert_eq!(&log[1..3], ["start_cursor", "start_capture painted=true"]);
+        assert!(
+            log.contains(&"set_cursor_painted false".to_string()),
+            "{log:?}"
+        );
+        assert_eq!(*shared.painted.lock().unwrap(), Some(false));
+    }
+
+    /// No sprite, no side channel: positions never reach the receiver and
+    /// the video keeps its cursor.
+    #[tokio::test]
+    async fn without_a_sprite_the_cursor_stays_in_the_video() {
+        let (seen, shared) = cursor_session(
+            "cn",
+            vec![
+                CursorEvent::Moved { x: 0.5, y: 0.5 },
+                CursorEvent::SpriteUnavailable("no ARGB".into()),
+                CursorEvent::Moved { x: 0.6, y: 0.6 },
+            ],
+        )
+        .await;
+        assert!(
+            seen.iter()
+                .all(|a| matches!(a, ReceiverAction::Cursor { visible: false, .. })),
+            "{seen:?}"
+        );
+        assert_eq!(*shared.painted.lock().unwrap(), Some(true));
+    }
+
+    /// A sprite that fails after going live: paint again, hide the
+    /// receiver's cursor, ignore what follows.
+    #[tokio::test]
+    async fn a_failing_sprite_after_going_live_paints_again() {
+        let (seen, shared) = cursor_session(
+            "cf",
+            vec![
+                sprite(),
+                CursorEvent::Moved { x: 0.5, y: 0.5 },
+                CursorEvent::SpriteUnavailable("captures failing".into()),
+                CursorEvent::Moved { x: 0.6, y: 0.6 },
+            ],
+        )
+        .await;
+        assert_eq!(*shared.painted.lock().unwrap(), Some(true));
+        assert_eq!(
+            seen.last(),
+            Some(&ReceiverAction::Cursor {
+                x: None,
+                y: None,
+                visible: false
+            })
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|a| matches!(a, ReceiverAction::Cursor { x: Some(x), .. } if *x == 0.6))
+        );
     }
 
     #[tokio::test]

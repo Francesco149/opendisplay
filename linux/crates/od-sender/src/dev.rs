@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use opendisplay_proto::control::{Scroll, Touch, TouchPhase};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::backend::hyprland::ipc::HyprlandIpc;
 use crate::backend::{CaptureEvent, CaptureOptions, DisplaySpec, FrameBuf, Position, detect};
@@ -346,12 +346,31 @@ fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>
         .output(output)
         .with_context(|| format!("no output {output}"))?;
     let (w, h) = (o.width.max(1) as u32, o.height.max(1) as u32);
-    info!("following the cursor on {output} ({w}x{h}) for {seconds:?}; move the pointer over it");
+    // As the backends see it: Hyprland reports logical units (see
+    // HyprlandOutput::cursor_space), others the protocol's pixels.
+    let space = match HyprlandIpc::from_env().and_then(|ipc| ipc.monitors()) {
+        Ok(ms) => {
+            let scale = ms
+                .iter()
+                .find(|m| m.name == output)
+                .map_or(1.0, |m| m.scale);
+            let highest = ms.iter().map(|m| m.scale).fold(1.0f64, f64::max);
+            crate::wayland::cursor::CursorSpace {
+                width: w as f64 / scale,
+                height: h as f64 / scale,
+                sprite_scale: highest,
+            }
+        }
+        Err(_) => crate::wayland::cursor::CursorSpace::pixels(w, h),
+    };
+    info!(
+        "following the cursor on {output} ({w}x{h} px, positions in {:.1}x{:.1}, sprite scale {}) for {seconds:?}; move the pointer over it",
+        space.width, space.height, space.sprite_scale
+    );
     let (tx, rx) = std::sync::mpsc::channel::<CursorEvent>();
     let mut thread = crate::wayland::cursor::CursorThread::spawn(
         output,
-        w,
-        h,
+        space,
         Box::new(move |ev| {
             let _ = tx.send(ev);
         }),
@@ -370,6 +389,7 @@ fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>
                 }
             }
             Ok(CursorEvent::Hidden) => info!("cursor hidden (left {output})"),
+            Ok(CursorEvent::SpriteUnavailable(why)) => warn!("no sprite: {why}"),
             Ok(CursorEvent::Image {
                 png,
                 nw,
@@ -392,9 +412,13 @@ fn cursor_test(output: &str, seconds: Duration, save: Option<std::path::PathBuf>
     thread.stop();
     let rate = moves as f64 / seconds.as_secs_f64();
     info!("{moves} position updates ({rate:.0}/s), {sprites} sprites");
-    if let (Some(path), Some(png)) = (save, last_png) {
-        std::fs::write(&path, png)?;
-        info!("wrote {}", path.display());
+    match (save, last_png) {
+        (Some(path), Some(png)) => {
+            std::fs::write(&path, png)?;
+            info!("wrote {}", path.display());
+        }
+        (Some(path), None) => warn!("no sprite arrived; {} not written", path.display()),
+        _ => {}
     }
     Ok(())
 }

@@ -183,6 +183,13 @@ pub trait VirtualDisplay: Send {
     fn start_cursor(&mut self, _sink: CursorSink) -> Result<()> {
         bail!("this display cannot deliver the cursor separately")
     }
+    /// Switch the frames between with and without a painted cursor, without
+    /// touching the output (a new capture session on the same output).
+    /// Used to stop painting once the side channel delivers the cursor, and
+    /// to paint again if it fails.
+    fn set_cursor_painted(&mut self, _painted: bool) -> Result<()> {
+        bail!("this display cannot switch cursor painting")
+    }
     /// Stop capture (frames and cursor) and join its threads. Idempotent.
     fn stop_capture(&mut self);
     /// Resize in place; stops capture first.
@@ -251,6 +258,9 @@ pub enum CursorEvent {
     Moved { x: f64, y: f64 },
     /// The cursor left the display (or has no image).
     Hidden,
+    /// No sprite can be delivered (unsupported format, captures failing):
+    /// the side channel must not be used, paint the cursor instead.
+    SpriteUnavailable(String),
     /// A new sprite: PNG bytes, its size normalized to the display, the
     /// hotspot normalized within the sprite.
     Image {

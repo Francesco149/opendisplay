@@ -8,12 +8,13 @@ use anyhow::Result;
 use tracing::warn;
 
 use super::capture::CaptureThread;
-use super::cursor::CursorThread;
+use super::cursor::{CursorSpace, CursorThread};
 use super::input::InputInjector;
 use crate::backend::lock::OutputLock;
 use crate::backend::{
     CaptureOptions, CursorSink, DisplayInfo, DisplaySpec, FrameSink, InputSink, VirtualDisplay,
 };
+use std::sync::{Arc, Mutex};
 
 /// The compositor-specific half of a display. Neither method is called while
 /// a capture of the output is running.
@@ -22,12 +23,21 @@ pub trait OutputControl: Send + 'static {
     fn reconfigure(&mut self, spec: &DisplaySpec) -> Result<()>;
     /// Remove the output (a no-op for outputs the sender did not create).
     fn remove(&mut self) -> Result<()>;
+    /// The units this compositor's cursor session reports in for the
+    /// output; the protocol's (pixels) unless the backend knows better.
+    fn cursor_space(&self) -> CursorSpace {
+        let i = self.info();
+        CursorSpace::pixels(i.width, i.height)
+    }
 }
 
 pub struct CapturedDisplay<O: OutputControl> {
     capture: Option<CaptureThread>,
     /// The cursor side channel's session; a capture of the output too.
     cursor: Option<CursorThread>,
+    /// The frame sink and options of the running capture, so it can be
+    /// restarted with the cursor painted or not.
+    frames: Option<(Arc<Mutex<FrameSink>>, CaptureOptions)>,
     output: O,
     /// Held for the display's lifetime; see [`crate::backend::lock`].
     _lock: OutputLock,
@@ -40,6 +50,7 @@ impl<O: OutputControl> CapturedDisplay<O> {
         Self {
             capture: None,
             cursor: None,
+            frames: None,
             output,
             _lock: lock,
             released: false,
@@ -65,8 +76,29 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
     }
 
     fn start_capture(&mut self, opts: CaptureOptions, sink: FrameSink) -> Result<()> {
-        self.stop_capture();
-        self.capture = Some(CaptureThread::spawn(&self.output.info().name, opts, sink)?);
+        // Frames only: a cursor session started just before keeps running.
+        if let Some(mut c) = self.capture.take() {
+            c.stop();
+        }
+        let shared = Arc::new(Mutex::new(sink));
+        self.capture = Some(spawn_frames(&self.output.info().name, opts, &shared)?);
+        self.frames = Some((shared, opts));
+        Ok(())
+    }
+
+    fn set_cursor_painted(&mut self, painted: bool) -> Result<()> {
+        let Some((shared, opts)) = self.frames.clone() else {
+            anyhow::bail!("not capturing");
+        };
+        if opts.cursor == painted {
+            return Ok(());
+        }
+        if let Some(mut c) = self.capture.take() {
+            c.stop();
+        }
+        let opts = CaptureOptions { cursor: painted };
+        self.capture = Some(spawn_frames(&self.output.info().name, opts, &shared)?);
+        self.frames = Some((shared, opts));
         Ok(())
     }
 
@@ -74,11 +106,9 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
         if let Some(mut c) = self.cursor.take() {
             c.stop();
         }
-        let info = self.output.info();
         self.cursor = Some(CursorThread::spawn(
-            &info.name,
-            info.width,
-            info.height,
+            &self.output.info().name,
+            self.output.cursor_space(),
             sink,
         )?);
         Ok(())
@@ -106,6 +136,20 @@ impl<O: OutputControl> VirtualDisplay for CapturedDisplay<O> {
     fn close(mut self: Box<Self>, keep_output: bool) -> Result<()> {
         self.release(keep_output)
     }
+}
+
+/// A capture thread feeding the shared sink (kept across restarts).
+fn spawn_frames(
+    name: &str,
+    opts: CaptureOptions,
+    shared: &Arc<Mutex<FrameSink>>,
+) -> Result<CaptureThread> {
+    let shared = shared.clone();
+    CaptureThread::spawn(
+        name,
+        opts,
+        Box::new(move |ev| (shared.lock().unwrap_or_else(|e| e.into_inner()))(ev)),
+    )
 }
 
 impl<O: OutputControl> Drop for CapturedDisplay<O> {

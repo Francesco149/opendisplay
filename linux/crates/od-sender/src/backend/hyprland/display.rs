@@ -7,6 +7,7 @@ use tracing::info;
 
 use super::ipc::{HyprlandIpc, Monitor};
 use crate::backend::{DisplayInfo, DisplaySpec};
+use crate::wayland::cursor::CursorSpace;
 use crate::wayland::display::OutputControl;
 
 pub struct HyprlandOutput {
@@ -70,6 +71,25 @@ impl OutputControl for HyprlandOutput {
         self.info = info_of(&m);
         info!("virtual display {}", self.info);
         Ok(())
+    }
+
+    /// Hyprland 0.56.2 reports cursor positions and hotspots in logical
+    /// units and renders the sprite at the highest monitor scale
+    /// (`CImageCopyCaptureCursorSession::sendCursorEvents`,
+    /// `CCursorManager::updateTheme`).
+    fn cursor_space(&self) -> CursorSpace {
+        let scale = self.info.scale.max(0.1);
+        let highest = self
+            .ipc
+            .monitors()
+            .map(|ms| ms.iter().map(|m| m.scale).fold(1.0f64, f64::max))
+            .unwrap_or(scale)
+            .max(1.0);
+        CursorSpace {
+            width: self.info.width as f64 / scale,
+            height: self.info.height as f64 / scale,
+            sprite_scale: highest,
+        }
     }
 
     fn remove(&mut self) -> Result<()> {
