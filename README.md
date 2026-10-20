@@ -274,9 +274,24 @@ The capture/streaming pipeline itself uses only public APIs.
 
 **Audio?** Out of scope for now.
 
+## Linux sender (beta)
+
+`od-sender` extends a Linux desktop onto any OpenDisplay receiver (iPhone,
+iPad, Android, or a spare Mac). The beta supports **Omarchy / Hyprland 0.55+**
+on aarch64 and x86_64; GNOME, KDE and Sway are coming.
+
+```sh
+yay -S opendisplay-sender
+od-sender run
+```
+
+Setup, the supported matrix, Hyprland permission rules, known issues and how
+to report a problem are in [linux/README.md](linux/README.md).
+
 ## Compatible apps
 
-The official apps cover a Mac sender and an iPhone/iPad receiver on iOS 15+.
+The official apps cover a Mac sender, a Linux sender in beta (see above) and
+an iPhone/iPad receiver on iOS 15+.
 Other people have built their own clients that speak the same protocol, so
 you can also use an Android device or an older iPad as a display, or drive
 one from Linux. The wire protocol is specified in
