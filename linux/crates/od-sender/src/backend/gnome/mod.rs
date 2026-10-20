@@ -6,6 +6,7 @@
 //! cannot apply.
 
 pub mod input;
+pub mod layout;
 pub mod mutter;
 
 use anyhow::{Result, bail};
@@ -22,6 +23,7 @@ use crate::pipewire::{PwCapture, PwSource};
 
 pub struct GnomeBackend {
     versions: (i32, i32),
+    cursor: CursorMode,
 }
 
 impl GnomeBackend {
@@ -29,7 +31,10 @@ impl GnomeBackend {
     pub fn connect() -> Result<Self> {
         let conn = zbus::blocking::Connection::session()?;
         let versions = mutter::probe(&conn)?;
-        Ok(Self { versions })
+        Ok(Self {
+            versions,
+            cursor: CursorMode::Embedded,
+        })
     }
 }
 
@@ -59,8 +64,16 @@ impl Backend for GnomeBackend {
 
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>> {
         let lock = lock_output(&spec.name)?;
-        let vm = VirtualMonitor::create(&request(spec))?;
-        Ok(Box::new(GnomeDisplay::new(spec, vm, lock)))
+        let vm = create(spec, self.cursor)?;
+        Ok(Box::new(GnomeDisplay::new(spec, vm, lock, self.cursor)))
+    }
+
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.cursor = if visible {
+            CursorMode::Embedded
+        } else {
+            CursorMode::Hidden
+        };
     }
 
     fn clean(&mut self) -> Result<Vec<String>> {
@@ -69,13 +82,24 @@ impl Backend for GnomeBackend {
     }
 }
 
-fn request(spec: &DisplaySpec) -> Request {
-    Request {
+/// The monitor for `spec`, then its scale and position (Mutter places a new
+/// monitor at scale 1 on the right).
+fn create(spec: &DisplaySpec, cursor: CursorMode) -> Result<VirtualMonitor> {
+    let mut vm = VirtualMonitor::create(&Request {
         width: spec.width,
         height: spec.height,
         hz: spec.hz,
-        cursor: CursorMode::Embedded,
+        cursor,
+    })?;
+    match vm.arrange(spec.scale, spec.position) {
+        Ok(scale) if (scale - spec.scale).abs() > 1e-6 => info!(
+            "scale {} is not available for {}x{}; using {scale}",
+            spec.scale, spec.width, spec.height
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("could not set scale/position of the virtual monitor: {e:#}"),
     }
+    Ok(vm)
 }
 
 fn info_of(name: &str, vm: &VirtualMonitor) -> DisplayInfo {
@@ -96,11 +120,12 @@ pub struct GnomeDisplay {
     capture: Option<PwCapture>,
     vm: Option<VirtualMonitor>,
     info: DisplayInfo,
+    cursor: CursorMode,
     _lock: OutputLock,
 }
 
 impl GnomeDisplay {
-    fn new(spec: &DisplaySpec, vm: VirtualMonitor, lock: OutputLock) -> Self {
+    fn new(spec: &DisplaySpec, vm: VirtualMonitor, lock: OutputLock, cursor: CursorMode) -> Self {
         let info = info_of(&spec.name, &vm);
         info!(
             "virtual display {} ({}, PipeWire node {})",
@@ -110,6 +135,7 @@ impl GnomeDisplay {
             capture: None,
             info,
             vm: Some(vm),
+            cursor,
             _lock: lock,
         }
     }
@@ -154,7 +180,7 @@ impl VirtualDisplay for GnomeDisplay {
                 warn!("stopping the old virtual monitor: {e:#}");
             }
         }
-        let vm = VirtualMonitor::create(&request(spec))?;
+        let vm = create(spec, self.cursor)?;
         self.info = info_of(&spec.name, &vm);
         info!("virtual display {} ({})", self.info, vm.placement.connector);
         self.vm = Some(vm);

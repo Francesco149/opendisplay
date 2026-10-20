@@ -186,3 +186,39 @@ jobs:
           name: kde-smoke-logs
           path: ${{ runner.temp }}/kde-smoke
           if-no-files-found: ignore
+
+  # GNOME backend: a headless Mutter (no GPU: vgem render node, software
+  # Mesa) with its own session bus, PipeWire and WirePlumber; virtual monitor
+  # over Mutter's ScreenCast/RemoteDesktop D-Bus APIs, PipeWire frames,
+  # pointer input, scale/position, cleanup after kill -9. The run happens
+  # under strace and fails if anything reaches the system bus. Experimental
+  # until a run proves it. See linux/testbench/gnome-smoke.sh.
+  gnome-smoke:
+    name: gnome smoke (x86_64, experimental)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Render node (vgem)
+        run: |
+          sudo modprobe vgem || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe vgem
+          }
+          ls -l /dev/dri
+
+      - name: GNOME smoke in an Arch container
+        run: |
+          mkdir -p "$RUNNER_TEMP/gnome-smoke"
+          docker run --rm --device /dev/dri \
+            -v "$PWD:/src" -v "$RUNNER_TEMP/gnome-smoke:/logs" \
+            archlinux:latest bash /src/linux/testbench/gnome-ci-container.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gnome-smoke-logs
+          path: ${{ runner.temp }}/gnome-smoke
+          if-no-files-found: ignore

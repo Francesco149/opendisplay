@@ -162,6 +162,10 @@ pub trait Backend: Send {
     fn open(&mut self, spec: &DisplaySpec) -> Result<Box<dyn VirtualDisplay>>;
     /// Remove `od-*` outputs that no running sender holds a lock on.
     fn clean(&mut self) -> Result<Vec<String>>;
+    /// Whether the cursor should be visible at all (`--cursor off`: no), for
+    /// backends that fix it when the output is created rather than per
+    /// capture. Called before the first [`open`](Self::open).
+    fn set_cursor_visible(&mut self, _visible: bool) {}
     /// The output lock [`open`](Self::open) takes for `spec`.
     fn lock_name(&self, spec: &DisplaySpec) -> String {
         spec.name.clone()

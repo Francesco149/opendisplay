@@ -642,6 +642,7 @@ pub async fn run(addr: SocketAddr, backend: &mut dyn Backend, opts: RunOptions) 
         backend.caps()
     );
     let mut shutdown = shutdown_signal()?;
+    backend.set_cursor_visible(opts.cursor != CursorMode::Off);
     let mut losses = LossBudget::default();
     let mut backoff = Backoff::default();
     if let Some(id) = &opts.receiver_id {
