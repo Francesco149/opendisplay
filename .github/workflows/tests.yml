@@ -66,3 +66,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
+
+      # The iOS 12 receiver (iOSLegacy/) compiles the iOS app's receiver,
+      # model and video view for iOS 12.2, below any target Xcode accepts, so
+      # it has its own build script instead of a scheme. Building it is what
+      # catches an iOS 13+ API, or Combine, reaching those shared files.
+      - name: Build iOS 12 legacy receiver
+        run: iOSLegacy/build.sh --unsigned

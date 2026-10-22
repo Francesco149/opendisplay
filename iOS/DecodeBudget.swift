@@ -32,6 +32,13 @@ enum DecodeBudget {
         // A8X: iPad Air 2. A8: iPad mini 4. Both top out at iPadOS 15.
         case "iPad5,1", "iPad5,2", "iPad5,3", "iPad5,4":
             return level42PixelsPerSecond
+        // iOS 12 legacy receiver (iOSLegacy/). A7: iPad Air (iPad4,1-3),
+        // iPad mini 2 and 3 (iPad4,4-9), iPhone 5s. A8: iPhone 6 and 6 Plus,
+        // iPod touch 6. Same Level 4.2-class decoder as the A8 iPads above.
+        case "iPad4,1", "iPad4,2", "iPad4,3", "iPad4,4", "iPad4,5", "iPad4,6",
+             "iPad4,7", "iPad4,8", "iPad4,9",
+             "iPhone6,1", "iPhone6,2", "iPhone7,1", "iPhone7,2", "iPod7,1":
+            return level42PixelsPerSecond
         default:
             return nil
         }

@@ -372,6 +372,11 @@ everything else works the same on every supported version.
 - **Build from source**: open the project in Xcode, select your free Apple ID
   under Signing, hit Run. Takes ~2 minutes.
 
+Devices that stop at **iOS 12** (iPad Air, iPad mini 2 and 3, iPhone 5s, 6
+and 6 Plus) can sideload [iOSLegacy/](iOSLegacy/README.md), the same receiver
+in a UIKit shell. It is source-only: no App Store or TestFlight build, and
+Xcode can't build or install it, so it has its own build script.
+
 ## Quick start (from source)
 
 ### Prerequisites
