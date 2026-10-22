@@ -290,6 +290,7 @@ not covered yet, start here:
 
 **Older iOS receivers**
 * [cuongpham1/ipad-iphone-second-monitor-ios12-free](https://github.com/cuongpham1/ipad-iphone-second-monitor-ios12-free) - iOS 12 client for iPads and iPhones that cannot run the official app
+* [Francesco149/opendisplay](https://github.com/Francesco149/opendisplay/tree/ios12-legacy-receiver/iOSLegacy) - the official receiver's code in a UIKit shell for iOS 12.2+ (iPad Air, iPad mini 2/3, iPhone 5s/6), sideloaded
 
 **Linux senders**
 * [tixwho/opendisplay-linux](https://github.com/tixwho/opendisplay-linux) - drive an iPhone or iPad from a Wayland desktop (KDE Plasma, Hyprland)

@@ -591,6 +591,14 @@ export default function App() {
               <span className="compat-repo">cuongpham1/ipad-iphone-second-monitor-ios12-free ↗</span>
               <p>For iPads and iPhones too old to run the official receiver.</p>
             </a>
+            <a
+              className="compat-item"
+              href="https://github.com/Francesco149/opendisplay/tree/ios12-legacy-receiver/iOSLegacy"
+            >
+              <span className="compat-role">iOS 12 receiver</span>
+              <span className="compat-repo">Francesco149/opendisplay ↗</span>
+              <p>The official receiver's code for iOS 12: iPad Air, iPad mini 2/3, iPhone 5s/6.</p>
+            </a>
             <a className="compat-item" href="https://github.com/tixwho/opendisplay-linux">
               <span className="compat-role">Linux sender</span>
               <span className="compat-repo">tixwho/opendisplay-linux ↗</span>
