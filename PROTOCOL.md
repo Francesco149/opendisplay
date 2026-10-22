@@ -822,6 +822,8 @@ working (video-discarding) example of the skeleton.
 SPS/PPS on every IDR, one picture per frame), send an IDR on connect and on
 `kf`, send `ping` every 2 s, ignore unknown control types. Input injection
 (`touch`, `scroll`, `pencil`) and cursor forwarding are optional layers.
+`tools/fake-sender.swift` does this with a test pattern instead of a
+desktop, over TCP or usbmuxd, which is enough to drive and test a receiver.
 
 ## Appendix B: Implementer's notes (non-normative)
 
